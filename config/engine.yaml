@@ -1,0 +1,11 @@
+# Engine process settings.
+poll_interval_seconds: 3          # control_commands polling (2-5 s)
+monitor_interval_seconds: 60      # position monitoring (SL/targets/trailing/time stops)
+slippage_pct: 0.05                # market-order slippage for paper fills
+data_provider: yfinance           # yfinance | angelone | upstox | replay
+fallback_providers: [yfinance]
+llm_backend: ollama               # ollama | rules (rules = deterministic interpretation, for fast replay)
+max_parallel_symbols: 2
+max_parallel_agents: 4
+use_os_cert_store: true           # trust Windows cert store (corporate proxies / AV HTTPS scanning)
+heartbeat_stale_seconds: 30

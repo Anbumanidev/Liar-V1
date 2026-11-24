@@ -1,0 +1,19 @@
+[project]
+name = "liar-v1"
+version = "0.1.0"
+description = "Multi-agent, multi-mode PAPER trading system for Indian equities (NSE). Never places real orders."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q -p no:cacheprovider --import-mode=importlib"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::FutureWarning",
+]
+markers = [
+    "network: test needs internet access (skipped by default unless RUN_NETWORK_TESTS=1)",
+    "ollama: test needs a running Ollama server (skipped unless RUN_OLLAMA_TESTS=1)",
+    "slow: slow test",
+]

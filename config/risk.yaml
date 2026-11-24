@@ -1,0 +1,40 @@
+# Deterministic risk manager + capital protection (sections 5 and 8).
+# Editable from the dashboard WITHIN config/hard_caps.yaml.
+risk_per_trade_pct: 1.0            # % of the mode's SIZING capital, before tier/budget reductions
+max_open_positions: 5              # used once trading capital >= small_capital_threshold
+max_position_pct: 40.0
+small_capital_threshold: 10000     # below this: small-capital rules apply
+small_max_open_positions: 2
+small_max_position_pct: 60.0       # max % of trading capital per position
+max_positions_per_sector: 1
+mis_leverage: 1.0                  # 1 = OFF. INTRADAY only. Never for CNC.
+daily_loss_limit_pct: 3.0          # % of trading capital -> no new entries that day
+intraday_no_entry_before: "09:30"
+intraday_no_entry_after: "14:45"
+intraday_squareoff: "15:15"
+conversion_cutoff: "15:10"         # INTRADAY -> SWING/POSITIONAL conversion deadline
+max_overnight_exposure_pct: 50.0
+gap_buffer_pct: 3.0                # overnight risk = max(SL risk, qty*entry*gap_buffer)
+avoid_events_in_window: true
+avoid_event_types: [RESULTS, BOARD_MEETING, EX_DIVIDEND, EX_DATE, SPLIT, BONUS, RIGHTS]
+circuit_buffer_pct: 2.0            # reject if within 2% of upper/lower circuit
+sl_min_atr: 0.3
+sl_max_atr: 3.0
+max_charges_pct_of_value: 1.0      # reject if round-trip charges > 1% of position value
+max_correlation: 0.7
+correlation_lookback_days: 20
+loss_budget_divisor: 3             # new trade max risk = min(normal, remaining budget / 3)
+max_loss_pct: 10.0                 # MAX_LOSS_PCT (hard cap 10)
+hard_stop_pct: 9.0                 # HARD_STOP_PCT (1% buffer for slippage/gaps)
+drawdown:
+  caution_pct: 3.0
+  defensive_pct: 6.0
+  caution_size_mult: 0.5
+  defensive_size_mult: 0.25
+  caution_grades: ["A+", "A"]
+  defensive_grades: ["A+"]
+  defensive_max_open_positions: 1
+  defensive_allow_new_overnight: false
+intraday_daily_profit_lock_pct: 2.0   # after +2% of trading capital: only A+ at half size
+intraday_profit_giveback_pct: 50.0    # stop intraday if open profit falls back 50% from day peak
+stale_price_seconds: 300

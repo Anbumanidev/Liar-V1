@@ -1,0 +1,56 @@
+# Pinned dependencies (verified on Python 3.14 / Windows 11). All open source.
+# Core
+pandas==3.0.6
+numpy==2.5.3
+pydantic==2.13.4
+pydantic-settings==2.14.2
+PyYAML==6.0.4
+loguru==0.8.0
+SQLAlchemy==2.1.9
+tzdata==2026.4
+certifi==2026.11.20
+requests==2.34.2
+httpx==0.28.1
+Jinja2==3.1.6
+
+# Orchestration / LLM (local, open-weight only)
+langgraph==1.2.24
+langchain-core==1.8.4
+ollama==0.6.3
+
+# Market data (data only - NEVER used for orders)
+yfinance==1.8.0
+smartapi-python==1.5.5
+logzero==1.7.0
+websocket-client==1.9.2
+PyOTP==2.12.1
+jugaad-data==0.37.4
+nsepython==2.101
+feedparser==6.0.14
+
+# Indicators / patterns
+TA-Lib==0.8.3.post1
+pandas-ta==0.4.71b0
+
+# Sentiment (FinBERT) - optional at runtime, degrades to NEUTRAL if unavailable
+transformers==5.24.0
+torch==2.12.1
+
+# Scheduler / notifications
+APScheduler==3.11.3
+
+# Dashboard
+streamlit==1.67.0
+streamlit-authenticator==0.4.2
+streamlit-autorefresh==1.0.1
+plotly==7.1.0
+matplotlib==3.11.2
+bcrypt==5.0.0
+openpyxl==3.1.5
+
+# Backtest / replay
+vectorbt==1.2.1
+backtrader==1.9.78.123
+
+# Tests
+pytest==9.2.0

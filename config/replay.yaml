@@ -1,0 +1,4 @@
+# REPLAY / walk-forward (section 9 / 17.12)
+btst_short_delivery_probability: 0.02   # simulated T+1 short-delivery event (replay only)
+seed: 42
+step_minutes: 1

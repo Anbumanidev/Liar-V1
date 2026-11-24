@@ -1,0 +1,10 @@
+# Universe & filters (section 7.5). Per-mode universe source is in modes.yaml.
+custom_symbols: []
+whitelist: []
+blacklist: []
+whitelist_only: false
+min_price: 20
+max_price: null
+min_avg_daily_turnover_cr: 5.0    # 20-day average daily turnover (Rs crore)
+max_spread_pct: 0.3
+excluded_sectors: []

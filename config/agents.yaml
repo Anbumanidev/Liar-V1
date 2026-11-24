@@ -1,0 +1,18 @@
+# Agents (section 4). Model per agent is in models.yaml (assignments).
+enabled:
+  fundamental: true
+  technical: true
+  price_action: true
+  volume_liquidity: true
+  market_context: true
+  news_sentiment: true
+  event_risk: true
+  entry_timing: true
+  stop_loss: true
+  exit_target: true
+  bull: true
+  bear: true
+  meta: true
+debate_enabled: true
+debate_rounds: 2            # rebuttal rounds
+prompt_versions: {}         # pin an agent to a prompt version, e.g. {meta: 3}; absent = latest

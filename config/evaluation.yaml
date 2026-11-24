@@ -1,0 +1,5 @@
+# Self-evaluation (section 7.6)
+auto_disable_min_trades: 30     # auto-disable a strategy if expectancy < 0 after this many trades
+kelly_enabled: false            # optional fractional Kelly
+kelly_fraction: 0.25
+kelly_min_trades: 50

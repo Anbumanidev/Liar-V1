@@ -1,0 +1,21 @@
+# =====================================================================================
+#  HARD CAPS - editable ONLY on disk. The dashboard can NEVER change these values.
+#  Dashboard inputs are clamped to these caps and show them.
+#
+#  The following are additionally HARD-CODED; the system refuses to start if you relax
+#  them here: paper_only=true, allow_overnight_shorts=false, sl_tighten_only=true,
+#  allow_averaging_down=false, max_loss_pct <= 10.
+# =====================================================================================
+
+paper_only: true                 # PAPER TRADING ONLY. Never place real orders.
+max_loss_pct: 10.0               # MAX_LOSS_PCT ceiling (section 8). Cannot exceed 10.
+max_mis_leverage: 5.0            # INTRADAY leverage ceiling (default leverage is 1 = off)
+max_risk_per_trade_pct: 2.0      # risk per trade (% of mode sizing capital) ceiling
+max_daily_loss_limit_pct: 5.0    # daily loss limit ceiling
+max_position_pct: 100.0          # max % of trading capital in one position
+max_overnight_exposure_pct: 100.0
+min_rr_floor: 1.0                # mode min R:R can not be configured below this
+max_slippage_pct: 1.0
+allow_overnight_shorts: false    # Indian cash market: no overnight shorts
+sl_tighten_only: true            # stop-loss may only move closer to price
+allow_averaging_down: false      # never add to a losing position

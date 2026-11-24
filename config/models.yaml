@@ -1,0 +1,27 @@
+# Local open-weight LLMs via Ollama (section 2). No paid APIs, ever.
+# Detected hardware: NVIDIA RTX 4050 Laptop (6 GB VRAM), 16 GB RAM, i5-12450H.
+#  - "low"  profile fits entirely in 6 GB VRAM (default).
+#  - "high" profile needs >= 12 GB VRAM (or will partially offload to CPU and be slow).
+# Qwen3 is chosen for its reliable JSON / structured output via Ollama's `format` schema.
+# Newer families (e.g. Gemma 4, Granite 4.x, Qwen 3.x) can be assigned per agent from the
+# dashboard once pulled - benchmark them on our schemas first.
+# Pull models with:  make pull-models   (or: python scripts/pull_models.py --profile low)
+ollama_host: "http://127.0.0.1:11434"
+active_profile: low
+profiles:
+  low:
+    reasoning: "qwen3:8b"      # Bull, Bear, Meta  (~5.2 GB Q4_K_M)
+    sub_agent: "qwen3:4b"      # Layer-1 specialists (~2.6 GB)
+  high:
+    reasoning: "qwen3:14b"     # ~9.3 GB
+    sub_agent: "qwen3:8b"
+assignments: {}                # per-agent override, e.g. {meta: "qwen3:14b"}
+finbert_model: "ProsusAI/finbert"
+finbert_device: auto           # auto | cpu | cuda
+temperature: 0.2
+num_ctx: 8192
+request_timeout_seconds: 120
+max_retries: 2                 # retry invalid JSON up to 2 times, then agent = FAILED (neutral vote)
+keep_alive: "15m"
+reasoning_think: false         # Qwen3 "thinking" for reasoning roles (slower; off on 6 GB GPUs)
+latency_warn_seconds: 60       # warn if one stock's full cycle exceeds this

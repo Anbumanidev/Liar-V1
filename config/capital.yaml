@@ -1,0 +1,8 @@
+# Capital management (section 6). STARTING_CAPITAL is set per batch.
+starting_capital: 1000
+profit_lock_pct: 30            # % of positive realized net P&L moved to RESERVE at EOD
+reserve_protected_pct: 50      # RESERVE never refilled below this % of its peak
+sizing_increase_threshold_pct: 10   # TRADING must be >= sizing * (1 + 10%) ...
+sizing_increase_days: 3             # ... for 3 consecutive trading days without a drawdown tier
+sizing_step_mode: TO_TRADING        # TO_TRADING: sizing jumps to TRADING balance | STEP_PCT
+sizing_step_pct: 10

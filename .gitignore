@@ -216,3 +216,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---- Liar-V1 project specific ----
+.venv/
+.env
+secrets/
+runtime/
+logs/*
+!logs/.gitkeep
+*.db
+*.db-wal
+*.db-shm
+.streamlit/secrets.toml

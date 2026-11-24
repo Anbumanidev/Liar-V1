@@ -1,0 +1,18 @@
+# Email notifications (section 13). SMTP credentials live in .env (never here).
+enabled_types:
+  PENDING_APPROVAL: true
+  ENTRY: true
+  EXIT: true
+  EOD: true
+  SWING_SCAN: true
+  URGENT: true
+  TEST: true
+recipients: []                 # empty = use ALERT_EMAIL_TO from .env
+quiet_hours_start: null        # e.g. "22:00"
+quiet_hours_end: null          # e.g. "07:00"
+urgent_ignores_quiet_hours: true
+smtp_host: smtp.gmail.com
+smtp_port: 587
+retries: 3
+retry_delay_seconds: 5
+subject_prefix: "[PAPER]"

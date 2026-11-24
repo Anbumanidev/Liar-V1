@@ -1,0 +1,21 @@
+# Daily schedule (section 10). IST, NSE trading days only.
+premarket: "08:30"
+preopen_check: "09:08"
+watchlist_build: "09:00"
+opening_range_start: "09:15"
+opening_range_end: "09:30"
+cnc_entry_window: {start: "09:20", end: "10:30"}
+intraday_cycle_start: "09:30"
+intraday_cycle_end: "14:45"
+intraday_cycle_minutes: 5
+btst_scan_window: {start: "14:30", end: "15:15"}
+btst_scan_minutes: 15
+intraday_squareoff: "15:15"
+cnc_time_stop: "15:20"
+eod_processing: "15:30"
+eod_report: "15:45"
+swing_scan: "16:00"
+swing_scan_deadline: "18:00"
+approval_timeout_check_seconds: 15
+holiday_overrides: []      # extra non-trading dates, e.g. [2026-12-25]
+special_sessions: []       # trading on otherwise-holiday dates (e.g. Muhurat)

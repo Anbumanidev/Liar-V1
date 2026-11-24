@@ -1,0 +1,43 @@
+# =====================================================================================
+#  CHARGES MODEL (section 9). Rates are in PERCENT of turnover unless noted.
+#  !!! VERIFY CURRENT RATES before relying on results: statutory rates and broker tariffs
+#  change. Check your broker's charges page (e.g. zerodha.com/charges) and update
+#  last_verified. STT rates confirmed for 2026 (2026 F&O STT changes did not touch
+#  equity). NSE transaction charge, stamp duty and DP charge: please re-verify.
+#
+#  NOTE FOR SMALL CAPITAL: the CNC DP charge (~Rs 15.34 per scrip per sell day) is ~2.5%
+#  of a Rs 600 position, so most CNC trades on a Rs 1,000 account will be rejected by the
+#  1%-of-position-value charges rule (logged as CHARGES_EXCEED_EDGE / CHARGES_TOO_HIGH).
+# =====================================================================================
+last_verified: 2026-11-24
+note: "STT verified 2026-11-24. Re-verify NSE txn charge, stamp duty and DP charge with your broker."
+
+mis:                               # INTRADAY
+  brokerage_model: PCT_CAP         # FLAT | PCT_CAP | ZERO
+  brokerage_flat: 20.0             # Rs per executed order (FLAT)
+  brokerage_pct: 0.03              # % of order value (PCT_CAP)
+  brokerage_cap: 20.0              # Rs cap per order (PCT_CAP) -> min(Rs 20, 0.03%)
+  stt_buy_pct: 0.0
+  stt_sell_pct: 0.025              # STT on sell side only
+  exchange_txn_pct: 0.00297        # NSE transaction charge
+  sebi_per_crore: 10.0             # SEBI turnover fee Rs 10 / crore
+  stamp_buy_pct: 0.003             # stamp duty on buy side
+  gst_pct: 18.0                    # on brokerage + exchange txn + SEBI fee
+  dp_charge_per_scrip: 0.0
+  ipft_pct: 0.0001                 # NSE IPFT Rs 10 / crore
+  round_stt_stamp: true
+
+cnc:                               # BTST / SWING / POSITIONAL (delivery)
+  brokerage_model: ZERO            # common for discount brokers
+  brokerage_flat: 20.0
+  brokerage_pct: 0.03
+  brokerage_cap: 20.0
+  stt_buy_pct: 0.1                 # STT on both buy and sell
+  stt_sell_pct: 0.1
+  exchange_txn_pct: 0.00297
+  sebi_per_crore: 10.0
+  stamp_buy_pct: 0.015             # higher stamp duty on delivery buy
+  gst_pct: 18.0
+  dp_charge_per_scrip: 13.0        # per scrip on the sell day (+ GST => ~Rs 15.34)
+  ipft_pct: 0.0001
+  round_stt_stamp: true

@@ -1,0 +1,3 @@
+# Strategy library (section 7.2). Parameter ranges are enforced in code (strategies/*).
+# Missing params fall back to each strategy's coded defaults.
+strategies: {}
