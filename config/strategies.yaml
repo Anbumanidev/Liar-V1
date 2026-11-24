@@ -1,3 +1,176 @@
-# Strategy library (section 7.2). Parameter ranges are enforced in code (strategies/*).
-# Missing params fall back to each strategy's coded defaults.
-strategies: {}
+# Strategy library (section 7.2). Every parameter is editable from the dashboard;
+# values are clamped in code to each strategy's ParamSpec range (strategies/*).
+# Missing params fall back to the coded defaults; unknown params are ignored with a warning.
+# modes: the modes this strategy may run in (empty list = every mode it supports).
+strategies:
+  # ---------------------------------------------------------------- INTRADAY
+  cpr_breakout:
+    enabled: true
+    modes: [INTRADAY]
+    params:
+      max_cpr_width_pct: 0.5            # Maximum CPR width in % of price  [0.05..2]
+      buffer_atr: 0.05                  # Close beyond the CPR by this many ATR  [0..0.5]
+      max_extension_atr: 1.2            # Skip if price ran further past the CPR (ATR)  [0.2..3]
+      min_rvol: 1.2                     # Minimum relative volume  [0.8..5]
+      sl_buffer_atr: 0.2                # SL buffer beyond the CPR in ATR  [0..1]
+      t2_r: 3.0                         # Second target in R when no farther level exists  [2..6]
+  ema_9_21_pullback:
+    enabled: true
+    modes: [INTRADAY]
+    params:
+      touch_atr: 0.2                    # Bar must come within this many ATR of EMA 9  [0..1]
+      sl_buffer_atr: 0.3                # SL buffer beyond EMA 21 in ATR  [0.05..1.5]
+      min_adx: 20.0                     # Minimum ADX on 5m/15m (ignored if unknown)  [10..40]
+      t2_r: 3.0                         # Second target in R when no farther level exists  [2..6]
+  gap_and_go:
+    enabled: true
+    modes: [INTRADAY]
+    params:
+      min_gap_pct: 1.0                  # Minimum absolute gap in %  [0.3..5]
+      max_gap_pct: 5.0                  # Maximum absolute gap in % (exhaustion risk)  [1..10]
+      min_rvol: 1.5                     # Minimum relative volume  [1..5]
+      max_extension_atr: 1.0            # Skip if price ran further past the OR (ATR)  [0.2..3]
+      t2_r: 3.0                         # Second target in R when no farther level exists  [2..6]
+  gap_fill:
+    enabled: true
+    modes: [INTRADAY]
+    params:
+      min_gap_pct: 0.8                  # Minimum absolute gap in %  [0.3..5]
+      max_gap_pct: 4.0                  # Maximum absolute gap in %  [1..8]
+      sl_buffer_atr: 0.2                # SL buffer beyond the OR extreme in ATR  [0..1]
+      t2_r: 3.0                         # Second target in R when no farther level exists  [2..6]
+  mean_reversion:
+    enabled: true
+    modes: [INTRADAY]
+    params:
+      rsi_oversold: 30.0                # RSI at or below = oversold (longs)  [15..40]
+      rsi_overbought: 70.0              # RSI at or above = overbought (shorts)  [60..85]
+      sl_buffer_atr: 0.3                # SL buffer beyond the bar extreme in ATR  [0.05..1]
+      t2_r: 2.5                         # Second target in R when no farther level exists  [2..5]
+  opening_range_breakout:
+    enabled: true
+    modes: [INTRADAY]
+    params:
+      min_rvol: 1.5                     # Minimum relative volume  [1..5]
+      buffer_atr: 0.05                  # Close beyond the range by this many ATR  [0..0.5]
+      max_or_width_atr: 4.0             # Skip if the opening range is wider (ATR)  [1..8]
+      max_extension_atr: 1.0            # Skip if price ran further past the range (ATR)  [0.2..3]
+      max_sl_atr: 2.0                   # Use the OR midpoint when the full range is wider (ATR)  [0.5..3]
+      t2_r: 3.0                         # Second target in R when no farther level exists  [2..6]
+  relative_strength_momentum:
+    enabled: true
+    modes: [INTRADAY]
+    params:
+      min_rs_pct: 1.0                   # Minimum % out/under-performance vs NIFTY  [0.2..5]
+      near_extreme_atr: 0.75            # Max distance from day high/low in ATR  [0.1..2]
+      min_rvol: 1.2                     # Minimum relative volume  [0.8..5]
+      sl_atr: 1.2                       # Fallback SL distance in ATR  [0.5..2.5]
+      t2_r: 3.0                         # Second target in R when no farther level exists  [2..6]
+  supertrend_adx_15m:
+    enabled: true
+    modes: [INTRADAY]
+    params:
+      min_adx: 25.0                     # Minimum ADX(14) on 15m  [15..45]
+      max_dist_atr: 2.0                 # Max distance from the Supertrend line (15m ATR)  [0.5..4]
+      sl_buffer_atr: 0.1                # SL buffer beyond the Supertrend line (15m ATR)  [0..1]
+      t2_r: 3.0                         # Second target in R when no farther level exists  [2..6]
+  vwap_pullback:
+    enabled: true
+    modes: [INTRADAY]
+    params:
+      touch_atr: 0.3                    # Bar must come within this many ATR of VWAP  [0.05..1]
+      sl_atr: 0.5                       # SL distance beyond VWAP in ATR  [0.1..1.5]
+      min_adx: 18.0                     # Minimum 15m ADX (ignored if unknown)  [10..40]
+      t2_r: 3.0                         # Second target in R when no farther level exists  [2..6]
+  # ---------------------------------------------------------------- BTST
+  btst_strong_close:
+    enabled: true
+    modes: [BTST]
+    params:
+      min_close_pos: 0.8                # Min close position in the day range (0-1)  [0.5..0.98]
+      min_change_pct: 1.0               # Min % change vs previous close  [0.2..5]
+      max_change_pct: 6.0               # Max % change (circuit/exhaustion guard)  [2..15]
+      min_rvol: 1.3                     # Minimum relative volume  [1..5]
+      min_delivery_ratio: 1.0           # Delivery % vs its 20-day average  [0.5..3]
+      require_delivery: false           # Skip when delivery data is missing
+      min_sector_change_pct: 0.0        # Min sector strength (%)  [-2..3]
+      min_market_change_pct: 0.0        # Min NIFTY % change  [-1..2]
+      sl_atr: 0.6                       # SL distance in daily ATR  [0.3..1.5]
+      t2_r: 3.0                         # Second target in R when no farther level exists  [2..5]
+  # ---------------------------------------------------------------- SWING
+  swing_base_breakout:
+    enabled: true
+    modes: [SWING]
+    params:
+      max_base_depth_pct: 15.0          # Maximum base depth in %  [4..30]
+      buffer_pct: 0.3                   # Close above the base high by this %  [0..3]
+      max_extension_atr: 1.5            # Skip if close is further past the base (ATR)  [0.3..4]
+      min_rvol: 1.5                     # Minimum relative volume  [1..5]
+      sl_atr: 1.0                       # SL distance below the base high in ATR  [0.3..3]
+      max_holding_days: 10              # Maximum holding period (trading days)  [2..10]
+      t2_r: 3.0                         # Second target in R when no farther level exists  [2..6]
+  swing_ema_pullback:
+    enabled: true
+    modes: [SWING]
+    params:
+      touch_pct: 1.0                    # Low within this % of the EMA counts as a touch  [0.1..3]
+      rsi_min: 40.0                     # Minimum RSI(14)  [25..55]
+      rsi_max: 65.0                     # Maximum RSI(14)  [55..80]
+      sl_buffer_atr: 0.5                # SL buffer below the bar low / EMA in ATR  [0.1..2]
+      max_holding_days: 10              # Maximum holding period (trading days)  [2..10]
+      t2_r: 3.0                         # Second target in R when no farther level exists  [2..6]
+  swing_reversal_divergence:
+    enabled: true
+    modes: [SWING]
+    params:
+      rsi_max: 45.0                     # Maximum RSI(14) on the signal bar  [30..60]
+      near_support_atr: 1.0             # Low within this many ATR of support  [0.2..3]
+      sl_buffer_atr: 0.5                # SL buffer below the low/support in ATR  [0.1..2]
+      max_holding_days: 10              # Maximum holding period (trading days)  [2..10]
+      t2_r: 3.0                         # Second target in R when no farther level exists  [2..6]
+  swing_rs_leader:
+    enabled: true
+    modes: [SWING]
+    params:
+      min_rs_pct: 5.0                   # Minimum % outperformance vs NIFTY  [1..20]
+      min_adx: 20.0                     # Minimum daily ADX(14) (ignored if unknown)  [10..40]
+      rsi_min: 55.0                     # Minimum RSI(14)  [45..65]
+      rsi_max: 75.0                     # Maximum RSI(14)  [65..85]
+      near_high_pct: 5.0                # Close within this % of the 52-week high  [1..15]
+      sl_buffer_atr: 0.5                # SL buffer below EMA 20 in ATR  [0.1..2]
+      sl_atr: 2.0                       # Fallback SL distance in ATR  [1..3]
+      max_holding_days: 10              # Maximum holding period (trading days)  [2..10]
+      t2_r: 3.0                         # Second target in R when no farther level exists  [2..6]
+  # ---------------------------------------------------------------- POSITIONAL
+  positional_52w_breakout:
+    enabled: true
+    modes: [POSITIONAL]
+    params:
+      near_high_pct: 1.0                # Close within this % of the 52-week high  [0..3]
+      min_rvol: 1.5                     # Minimum relative volume  [1..5]
+      max_ext_ema50_atr: 6.0            # Max distance above EMA 50 in ATR  [2..12]
+      sl_atr: 2.0                       # SL distance in daily ATR  [1..3]
+      max_holding_days: 63              # Maximum holding period (trading days)  [10..63]
+      t2_r: 4.0                         # Second target in R when no farther level exists  [2.5..8]
+  positional_sector_rotation:
+    enabled: true
+    modes: [POSITIONAL]
+    params:
+      top_n_sectors: 3                  # Sector must rank within the top N  [1..6]
+      min_sector_strength: 0.5          # Minimum sector strength (%)  [-1..5]
+      min_rs_pct: 2.0                   # Minimum % outperformance vs NIFTY  [0..15]
+      rsi_max: 75.0                     # Maximum daily RSI(14)  [60..85]
+      sl_atr: 2.5                       # Fallback SL distance in daily ATR  [1..3]
+      max_holding_days: 40              # Maximum holding period (trading days)  [10..63]
+      t2_r: 4.0                         # Second target in R when no farther level exists  [2.5..8]
+  positional_weekly_trend:
+    enabled: true
+    modes: [POSITIONAL]
+    params:
+      min_adx: 20.0                     # Minimum weekly ADX(14) (ignored if unknown)  [10..40]
+      min_fundamental_score: 60.0       # Minimum fundamentals score  [0..100]
+      require_fundamentals: false       # Skip when no fundamentals score
+      sl_max_atr: 3.0                   # Max structural SL distance in daily ATR  [1..3]
+      sl_atr: 2.5                       # Fallback SL distance in daily ATR  [1..3]
+      max_holding_days: 63              # Maximum holding period (trading days)  [10..63]
+      t2_r: 4.0                         # Second target in R when no farther level exists  [2.5..8]

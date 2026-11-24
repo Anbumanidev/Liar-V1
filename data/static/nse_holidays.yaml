@@ -1,0 +1,89 @@
+# NSE equity segment (CM) trading holidays - weekdays only (weekends are always non-trading).
+#
+# VERIFY: the exchange publishes next year's list in December and may add ad-hoc holidays
+# (elections, national events). Refresh with `load_calendar(..., fetch=True)` (NSE holiday-master
+# API, cached in runtime/cache) or edit this file. Dashboard -> Schedule -> holiday overrides /
+# special sessions take precedence over this file.
+#
+# Provenance (checked 2026-11-24):
+#   2024, 2025 : cross-checked against NIFTY 50 daily bars (every weekday without a session) and
+#                the NSE circulars. verified: true
+#   2026       : NSE holiday-master API (type=trading, segment CM) + NIFTY bars up to 2026-11-23.
+#                verified: true
+#   2027       : NOT yet published by NSE. Best-effort ESTIMATE from the Hindu/Islamic lunar
+#                calendars - verified: false. Replace when NSE publishes the 2027 circular.
+#
+# Diwali Laxmi Pujan days carry a one-hour evening "Muhurat" session only. The regular
+# 09:15-15:30 session is closed, so they are listed as holidays (this system never trades Muhurat).
+last_checked: 2026-11-24
+holidays:
+  # ------------------------------------------------------------------ 2024 (verified)
+  - {date: 2024-01-22, name: "Special holiday (Shri Ram Lalla Pran Pratishtha)", verified: true}
+  - {date: 2024-01-26, name: "Republic Day", verified: true}
+  - {date: 2024-03-08, name: "Mahashivratri", verified: true}
+  - {date: 2024-03-25, name: "Holi", verified: true}
+  - {date: 2024-03-29, name: "Good Friday", verified: true}
+  - {date: 2024-04-11, name: "Id-Ul-Fitr (Ramadan Eid)", verified: true}
+  - {date: 2024-04-17, name: "Shri Ram Navami", verified: true}
+  - {date: 2024-05-01, name: "Maharashtra Day", verified: true}
+  - {date: 2024-05-20, name: "General Elections (Mumbai)", verified: true}
+  - {date: 2024-06-17, name: "Bakri Id", verified: true}
+  - {date: 2024-07-17, name: "Moharram", verified: true}
+  - {date: 2024-08-15, name: "Independence Day", verified: true}
+  - {date: 2024-10-02, name: "Mahatma Gandhi Jayanti", verified: true}
+  - {date: 2024-11-01, name: "Diwali Laxmi Pujan (Muhurat session only)", verified: true}
+  - {date: 2024-11-15, name: "Gurunanak Jayanti", verified: true}
+  - {date: 2024-11-20, name: "Maharashtra Assembly Elections", verified: true}
+  - {date: 2024-12-25, name: "Christmas", verified: true}
+  # ------------------------------------------------------------------ 2025 (verified)
+  - {date: 2025-02-26, name: "Mahashivratri", verified: true}
+  - {date: 2025-03-14, name: "Holi", verified: true}
+  - {date: 2025-03-31, name: "Id-Ul-Fitr (Ramadan Eid)", verified: true}
+  - {date: 2025-04-10, name: "Shri Mahavir Jayanti", verified: true}
+  - {date: 2025-04-14, name: "Dr. Baba Saheb Ambedkar Jayanti", verified: true}
+  - {date: 2025-04-18, name: "Good Friday", verified: true}
+  - {date: 2025-05-01, name: "Maharashtra Day", verified: true}
+  - {date: 2025-08-15, name: "Independence Day", verified: true}
+  - {date: 2025-08-27, name: "Ganesh Chaturthi", verified: true}
+  - {date: 2025-10-02, name: "Mahatma Gandhi Jayanti / Dussehra", verified: true}
+  - {date: 2025-10-21, name: "Diwali Laxmi Pujan (Muhurat session only)", verified: true}
+  - {date: 2025-10-22, name: "Diwali Balipratipada", verified: true}
+  - {date: 2025-11-05, name: "Prakash Gurpurb Sri Guru Nanak Dev", verified: true}
+  - {date: 2025-12-25, name: "Christmas", verified: true}
+  # ------------------------------------------------------------------ 2026 (NSE holiday-master)
+  # (weekend holidays not listed: 15-Feb Mahashivratri, 21-Mar Id-Ul-Fitr, 15-Aug, 08-Nov Diwali)
+  - {date: 2026-01-15, name: "Municipal Corporation Election - Maharashtra", verified: true}
+  - {date: 2026-01-26, name: "Republic Day", verified: true}
+  - {date: 2026-03-03, name: "Holi", verified: true}
+  - {date: 2026-03-26, name: "Shri Ram Navami", verified: true}
+  - {date: 2026-03-31, name: "Shri Mahavir Jayanti", verified: true}
+  - {date: 2026-04-03, name: "Good Friday", verified: true}
+  - {date: 2026-04-14, name: "Dr. Baba Saheb Ambedkar Jayanti", verified: true}
+  - {date: 2026-05-01, name: "Maharashtra Day", verified: true}
+  - {date: 2026-05-28, name: "Bakri Id", verified: true}
+  - {date: 2026-06-26, name: "Muharram", verified: true}
+  - {date: 2026-09-14, name: "Ganesh Chaturthi", verified: true}
+  - {date: 2026-10-02, name: "Mahatma Gandhi Jayanti", verified: true}
+  - {date: 2026-10-20, name: "Dussehra", verified: true}
+  - {date: 2026-11-10, name: "Diwali Balipratipada", verified: true}
+  - {date: 2026-11-24, name: "Prakash Gurpurb Sri Guru Nanak Dev", verified: true}
+  - {date: 2026-12-25, name: "Christmas", verified: true}
+  # ------------------------------------------------------------------ 2027 (ESTIMATE - verify)
+  # Weekend in 2027 (not listed): Mahashivratri ~06-Mar, Maharashtra Day 01-May, Independence Day
+  # 15-Aug, Ganesh Chaturthi ~04-Sep, Gandhi Jayanti 02-Oct, Dussehra ~09-Oct, Balipratipada ~30-Oct,
+  # Guru Nanak Jayanti ~14-Nov, Christmas 25-Dec.
+  - {date: 2027-01-26, name: "Republic Day", verified: false}
+  - {date: 2027-03-10, name: "Id-Ul-Fitr (Ramadan Eid) - estimated", verified: false}
+  - {date: 2027-03-22, name: "Holi - estimated", verified: false}
+  - {date: 2027-03-26, name: "Good Friday", verified: false}
+  - {date: 2027-04-14, name: "Dr. Baba Saheb Ambedkar Jayanti", verified: false}
+  - {date: 2027-04-15, name: "Shri Ram Navami - estimated", verified: false}
+  - {date: 2027-04-19, name: "Shri Mahavir Jayanti - estimated", verified: false}
+  - {date: 2027-05-17, name: "Bakri Id - estimated", verified: false}
+  - {date: 2027-06-15, name: "Muharram - estimated", verified: false}
+  - {date: 2027-10-29, name: "Diwali Laxmi Pujan (Muhurat session only) - estimated", verified: false}
+
+# Weekend days on which NSE ran a FULL regular equity session.
+special_sessions:
+  - {date: 2024-01-20, name: "Saturday full trading session (in lieu of 22-Jan holiday)", verified: true}
+  - {date: 2025-02-01, name: "Union Budget Saturday session", verified: true}

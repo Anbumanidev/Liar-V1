@@ -1,0 +1,34 @@
+{% extends "_base.html.j2" %}
+{% import "_macros.html.j2" as m %}
+{% block content %}
+{{ m.tiles([
+  ("Filled at", e.fill_price|price, None),
+  ("Stop-loss", e.stop_loss|price, COLOR_NEG),
+  ("Target 1", e.target_1|price, COLOR_POS),
+]) }}
+
+{{ m.section("Position") }}
+{{ m.kv([
+  ("Symbol", e.symbol),
+  ("Mode / product", e.mode ~ " / " ~ e.product),
+  ("Side", e.side),
+  ("Quantity", e.qty|num(0)),
+  ("Order", e.order_type ~ (" (limit " ~ (e.limit_price|price) ~ ")" if e.limit_price else "")),
+  ("Filled", e.filled_at|dt),
+  ("Slippage", e.slippage|price),
+  ("Target 2", e.target_2|price),
+  ("Capital blocked (margin)", e.margin_blocked|inr),
+  ("Entry charges (accrued)", e.entry_charges|inr),
+  ("Risk if SL hits", e.risk_amount|inr),
+  ("Reward : risk (T1)", e.rr_t1|num),
+  ("Strategy", e.strategy or DASH),
+  ("Grade / regime", (e.grade or DASH) ~ " / " ~ (e.regime or DASH)),
+  ("Trailing", e.trailing_rule or DASH),
+  ("Max holding", ((e.max_holding_days|num(0)) ~ " trading days") if e.max_holding_days else DASH),
+  ("Source", e.source),
+]) }}
+{% if e.overnight %}
+{{ m.note("Overnight (CNC) position: gap risk applies; the stop-loss is checked at the next open.", 'info') }}
+{% endif %}
+<p style="margin:12px 0 0 0;font-size:12px;color:#6b6a66;">Position #{{ e.position_id }}{% if e.order_id %} &middot; order #{{ e.order_id }}{% endif %}. Manage it (tighten SL, targets, exit) from the dashboard.</p>
+{% endblock %}

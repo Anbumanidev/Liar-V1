@@ -1,0 +1,41 @@
+{% extends "_base.html.j2" %}
+{% import "_macros.html.j2" as m %}
+{% block content %}
+{{ m.note("Decide in the dashboard only (Approvals page): approve, modify or reject before " ~ (p.expires_at|dt) ~ ". With no decision the setup TIMES OUT and is shadow-tracked. Replying to this e-mail does nothing.", 'warn') }}
+
+{{ m.tiles([
+  ("Entry (" ~ p.entry_type ~ ")", p.entry|price, None),
+  ("Stop-loss", p.stop_loss|price, COLOR_NEG),
+  ("Target 1", p.target_1|price, COLOR_POS),
+]) }}
+
+{{ m.section("Trade") }}
+{{ m.kv([
+  ("Symbol", p.symbol),
+  ("Mode / product", p.mode ~ " / " ~ p.product),
+  ("Side", p.side),
+  ("Quantity", (p.qty|num(0)) ~ " (max allowed " ~ (p.max_qty|num(0)) ~ ")"),
+  ("Position value", p.position_value|inr),
+  ("Target 2", p.target_2|price),
+  ("Risk if SL hits", (p.risk_amount|inr) ~ " (" ~ (p.risk_per_share|inr) ~ "/share, " ~ (p.sl_pct|pct) ~ ")"),
+  ("Reward : risk (T1 / T2)", (p.rr_t1|num) ~ " / " ~ (p.rr_t2|num)),
+  ("Est. round-trip charges", p.est_charges|inr),
+  ("Confidence", (p.confidence|num(0)) ~ " / 100"),
+  ("Grade", p.grade or DASH),
+  ("Strategy", p.strategy or DASH),
+  ("Regime", p.regime or DASH),
+  ("Approval deadline", (p.expires_at|dt) ~ (" (" ~ p.time_left ~ " left)" if p.time_left else "")),
+]) }}
+
+{{ m.section("Top bull points") }}
+{{ m.bullets(p.bull_points, COLOR_POS) }}
+
+{{ m.section("Top bear points") }}
+{{ m.bullets(p.bear_points, COLOR_NEG) }}
+
+{% if p.reasoning %}
+{{ m.section("Meta agent summary") }}
+<p style="margin:4px 0;font-size:13px;color:#0b0b0b;">{{ p.reasoning }}</p>
+{% endif %}
+<p style="margin:12px 0 0 0;font-size:12px;color:#6b6a66;">Approval item #{{ p.id }}{% if p.decision_id %} &middot; decision #{{ p.decision_id }}{% endif %}. The risk manager re-checks the trade (including any edits) when you approve.</p>
+{% endblock %}

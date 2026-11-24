@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="x-apple-disable-message-reformatting">
+<title>[PAPER] {{ title }}</title>
+<style>
+  @media (max-width: 620px) {
+    .container { width: 100% !important; border-radius: 0 !important; }
+    .pad { padding-left: 12px !important; padding-right: 12px !important; }
+    .stack { display: block !important; width: 100% !important; }
+    .tbl td, .tbl th { padding: 6px 4px !important; font-size: 12px !important; }
+  }
+</style>
+</head>
+<body style="margin:0;padding:0;background:#f1f1ef;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0b0b0b;-webkit-text-size-adjust:100%;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f1f1ef;">
+  <tr>
+    <td align="center" style="padding:16px 8px;">
+      <table role="presentation" class="container" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;background:#ffffff;border-radius:8px;border:1px solid #e2e1dc;overflow:hidden;">
+        <tr>
+          <td class="pad" style="background:#8a4b00;color:#ffffff;padding:8px 16px;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">
+            PAPER TRADING &middot; simulated &middot; no real orders
+          </td>
+        </tr>
+        {% if accent %}
+        <tr><td style="height:4px;line-height:4px;font-size:0;background:{{ accent }};">&nbsp;</td></tr>
+        {% endif %}
+        <tr>
+          <td class="pad" style="padding:18px 16px 6px 16px;">
+            <div style="font-size:12px;color:#52514e;text-transform:uppercase;letter-spacing:0.06em;">{{ kicker }}</div>
+            <h1 style="margin:4px 0 0 0;font-size:20px;line-height:1.3;font-weight:700;color:#0b0b0b;">{{ title }}</h1>
+            {% if subtitle %}<div style="margin-top:4px;font-size:14px;color:#52514e;">{{ subtitle }}</div>{% endif %}
+          </td>
+        </tr>
+        <tr>
+          <td class="pad" style="padding:8px 16px 16px 16px;font-size:14px;line-height:1.5;">
+            {% block content %}{% endblock %}
+          </td>
+        </tr>
+        <tr>
+          <td class="pad" style="padding:12px 16px 16px 16px;border-top:1px solid #e2e1dc;font-size:11px;line-height:1.5;color:#6b6a66;">
+            Liar-V1 &middot; PAPER TRADING ONLY &middot; no real money, no broker orders.<br>
+            Generated {{ generated_at|dt }}. All controls and approvals are in the dashboard; replying to this e-mail does nothing.
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+</body>
+</html>

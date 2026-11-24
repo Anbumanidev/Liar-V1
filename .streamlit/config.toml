@@ -1,0 +1,23 @@
+# Liar-V1 dashboard - Streamlit configuration (PAPER TRADING ONLY).
+# Bound to localhost by default. For phone access use Tailscale or an HTTPS reverse proxy
+# (e.g. Caddy) in front of 127.0.0.1:8501 - never expose plain HTTP to the internet.
+
+[server]
+address = "127.0.0.1"
+port = 8501
+headless = true
+enableXsrfProtection = true
+enableCORS = true
+runOnSave = false
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false
+serverAddress = "127.0.0.1"
+
+[client]
+toolbarMode = "minimal"
+showErrorDetails = "type"
+
+[runner]
+magicEnabled = false

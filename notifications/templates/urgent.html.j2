@@ -1,0 +1,10 @@
+{% extends "_base.html.j2" %}
+{% import "_macros.html.j2" as m %}
+{% block content %}
+{{ m.note(message, 'danger') }}
+{% if details %}
+{{ m.section("Details") }}
+{{ m.kv(details) }}
+{% endif %}
+<p style="margin:12px 0 0 0;font-size:13px;color:#0b0b0b;">Open the dashboard to review positions and engine status. A HALT can only be lifted from the dashboard.</p>
+{% endblock %}

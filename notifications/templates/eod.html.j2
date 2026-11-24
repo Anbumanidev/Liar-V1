@@ -1,0 +1,158 @@
+{% extends "_base.html.j2" %}
+{% import "_macros.html.j2" as m %}
+{% block content %}
+{% set c = r.capital %}
+{% if r.empty %}
+{{ m.note("Quiet day: no trades closed, no open positions and no approvals recorded for this batch today.", 'info') }}
+{% endif %}
+{% if c.halted %}
+{{ m.note("CAPITAL PROTECTION HALT is active" ~ ((": " ~ c.halt_reason) if c.halt_reason else "") ~ ". New trades are blocked until you resume from the dashboard.", 'danger') }}
+{% endif %}
+
+{{ m.tiles([
+  ("Realized net today", r.totals.net|inr(2, true), r.totals.net|pnl_color),
+  ("Total equity", c.total_equity|inr, None),
+  ("Drawdown / tier", (c.drawdown_pct|pct) ~ " / " ~ c.tier, COLOR_NEG if c.tier != 'NORMAL' else None),
+]) }}
+
+{{ m.section("Trades by mode") }}
+{% if r.modes %}
+<div style="overflow-x:auto;">
+<table role="presentation" class="tbl" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+  <tr>{{ m.th("Mode") }}{{ m.th("Trades", 'right') }}{{ m.th("Win %", 'right') }}{{ m.th("Gross", 'right') }}{{ m.th("Charges", 'right') }}{{ m.th("Net", 'right') }}</tr>
+  {% for row in r.modes %}
+  <tr>{{ m.td(row.mode) }}{{ m.td((row.trades|num(0)) ~ " (" ~ row.wins ~ "W/" ~ row.losses ~ "L)", 'right') }}{{ m.td(row.win_rate|pct(0), 'right') }}{{ m.td(row.gross|inr(2, true), 'right', row.gross|pnl_color) }}{{ m.td(row.charges|inr, 'right') }}{{ m.td(row.net|inr(2, true), 'right', row.net|pnl_color, true) }}</tr>
+  {% endfor %}
+  <tr>{{ m.td("TOTAL", bold=true) }}{{ m.td((r.totals.trades|num(0)) ~ " (" ~ r.totals.wins ~ "W/" ~ r.totals.losses ~ "L)", 'right', bold=true) }}{{ m.td(r.totals.win_rate|pct(0), 'right', bold=true) }}{{ m.td(r.totals.gross|inr(2, true), 'right', r.totals.gross|pnl_color, true) }}{{ m.td(r.totals.charges|inr, 'right', bold=true) }}{{ m.td(r.totals.net|inr(2, true), 'right', r.totals.net|pnl_color, true) }}</tr>
+</table>
+</div>
+<p style="margin:6px 0 0 0;font-size:11px;color:#6b6a66;">Trades = positions with a closed leg today (partial exits are combined); win = net P&amp;L &gt; 0.</p>
+{% if r.trades %}
+<div style="overflow-x:auto;margin-top:8px;">
+<table role="presentation" class="tbl" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+  <tr>{{ m.th("Symbol") }}{{ m.th("Mode") }}{{ m.th("Exit") }}{{ m.th("Net", 'right') }}</tr>
+  {% for t in r.trades[:limits.trades] %}
+  <tr>{{ m.td(t.symbol ~ (" (part)" if t.is_partial else "")) }}{{ m.td(t.mode) }}{{ m.td(t.exit_reason) }}{{ m.td(t.net|inr(2, true), 'right', t.net|pnl_color) }}</tr>
+  {% endfor %}
+</table>
+</div>
+{% if r.trades|length > limits.trades %}<p style="margin:4px 0;font-size:12px;color:#6b6a66;">+{{ r.trades|length - limits.trades }} more legs in the dashboard.</p>{% endif %}
+{% endif %}
+{% else %}
+<p style="margin:4px 0;color:#6b6a66;">No trades closed today.</p>
+{% endif %}
+
+{{ m.section("Open positions carried overnight") }}
+{% if r.open_positions %}
+<div style="overflow-x:auto;">
+<table role="presentation" class="tbl" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+  <tr>{{ m.th("Symbol") }}{{ m.th("Qty @ avg", 'right') }}{{ m.th("LTP", 'right') }}{{ m.th("Unrealized", 'right') }}{{ m.th("Days", 'right') }}</tr>
+  {% for p in r.open_positions %}
+  <tr>{{ m.td(p.symbol ~ " " ~ p.mode ~ "/" ~ p.product) }}{{ m.td((p.qty|num(0)) ~ " @ " ~ (p.avg_entry|price), 'right') }}{{ m.td((p.last_price|price) ~ (" *" if p.price_missing else ""), 'right') }}{{ m.td((p.unrealized_net|inr(2, true)) ~ " (" ~ (p.unrealized_pct|pct(1, true)) ~ ")", 'right', p.unrealized_net|pnl_color) }}{{ m.td(p.days_held, 'right') }}</tr>
+  {% endfor %}
+  <tr>{{ m.td("TOTAL", bold=true) }}{{ m.td("") }}{{ m.td("") }}{{ m.td(r.open_unrealized_total|inr(2, true), 'right', r.open_unrealized_total|pnl_color, true) }}{{ m.td("") }}</tr>
+</table>
+</div>
+<p style="margin:6px 0 0 0;font-size:11px;color:#6b6a66;">Unrealized P&amp;L is net of accrued entry charges. Days = trading days held.{% if r.open_positions|selectattr('price_missing')|list %} * no recent price: marked at entry.{% endif %}</p>
+{% else %}
+<p style="margin:4px 0;color:#6b6a66;">No open positions.</p>
+{% endif %}
+
+{{ m.section("Capital") }}
+{% if c.available %}
+{{ m.kv([
+  ("Realized net P&L today", c.realized_today|inr(2, true), c.realized_today|pnl_color),
+  ("Profit locked to RESERVE", c.profit_locked|inr),
+  ("Loss absorbed by TRADING", c.loss_absorbed|inr),
+  ("Refilled from RESERVE", c.refilled|inr),
+  ("TRADING (cash + blocked)", c.trading_balance|inr),
+  ("of which blocked in positions", c.blocked|inr),
+  ("RESERVE (locked, never traded)", c.reserve|inr),
+  ("Unrealized P&L (open positions)", c.unrealized_pnl|inr(2, true), c.unrealized_pnl|pnl_color),
+  ("TOTAL EQUITY", c.total_equity|inr),
+  ("High-water mark", c.hwm|inr),
+  ("Drawdown from HWM", c.drawdown_pct|pct),
+  ("Drawdown tier", c.tier, COLOR_NEG if c.tier != 'NORMAL' else None),
+  ("Sizing capital", c.sizing_capital|inr),
+  ("Starting capital", c.starting_capital|inr),
+]) }}
+{% if c.mode_sizing %}
+<p style="margin:6px 0 0 0;font-size:12px;color:#52514e;">Per-mode sizing: {% for mode, amt in c.mode_sizing.items() %}{{ mode }} {{ amt|inr }}{% if not loop.last %} &middot; {% endif %}{% endfor %}</p>
+{% endif %}
+{% if c.manual_transfers or c.manual_adjustments or c.dividends_today %}
+<p style="margin:6px 0 0 0;font-size:12px;color:#52514e;">Also today: manual RESERVE&rarr;TRADING {{ c.manual_transfers|inr }} &middot; manual adjustments {{ c.manual_adjustments|inr(2, true) }} &middot; dividends {{ c.dividends_today|inr(2, true) }}</p>
+{% endif %}
+{% if not c.eod_processed %}
+<p style="margin:6px 0 0 0;font-size:12px;color:#8a4b00;">EOD capital processing has not run yet for this day; figures are live balances.</p>
+{% endif %}
+{% else %}
+<p style="margin:4px 0;color:#6b6a66;">No capital account found for this batch.</p>
+{% endif %}
+
+{{ m.section("Equity curve") }}
+{% if chart_cid %}
+<img src="cid:{{ chart_cid }}" alt="Total equity by day: {{ r.equity_series|length }} points, latest {{ c.total_equity|inr }}" width="568" style="display:block;width:100%;max-width:568px;height:auto;border:0;">
+{% else %}
+<p style="margin:4px 0;color:#6b6a66;">Equity chart unavailable.</p>
+{% endif %}
+{% if r.equity_series %}
+<p style="margin:6px 0 0 0;font-size:11px;color:#6b6a66;">{% for pt in r.equity_series[-5:] %}{{ pt.day|d }}: {{ pt.equity|inr }}{% if not loop.last %} &middot; {% endif %}{% endfor %}</p>
+{% endif %}
+
+{{ m.section("Stocks analysed but not traded") }}
+{% if r.not_traded %}
+<div style="overflow-x:auto;">
+<table role="presentation" class="tbl" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+  <tr>{{ m.th("Symbol") }}{{ m.th("Mode") }}{{ m.th("Why not") }}</tr>
+  {% for s in r.not_traded[:limits.not_traded] %}
+  <tr>{{ m.td(s.symbol) }}{{ m.td(s.mode) }}{{ m.td(s.reason) }}</tr>
+  {% endfor %}
+</table>
+</div>
+{% if r.not_traded_total > limits.not_traded %}<p style="margin:4px 0;font-size:12px;color:#6b6a66;">+{{ r.not_traded_total - limits.not_traded }} more in the dashboard (Decisions / Universe).</p>{% endif %}
+{% else %}
+<p style="margin:4px 0;color:#6b6a66;">None recorded.</p>
+{% endif %}
+
+{{ m.section("My approvals vs rejections") }}
+{% set a = r.approvals %}
+{{ m.kv([
+  ("Approval requests", a.total|num(0)),
+  ("Approved (as proposed)", a.approved|num(0)),
+  ("Approved with edits", a.modified|num(0)),
+  ("Rejected by me", a.rejected|num(0)),
+  ("Timed out", a.timeout|num(0)),
+  ("Still pending", a.pending|num(0)),
+]) }}
+
+{{ m.section("Shadow outcomes (rejected setups, no capital)") }}
+{% set s = r.shadow %}
+{% if s.by_source %}
+<div style="overflow-x:auto;">
+<table role="presentation" class="tbl" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+  <tr>{{ m.th("Rejected by") }}{{ m.th("Setups", 'right') }}{{ m.th("Target", 'right') }}{{ m.th("SL", 'right') }}{{ m.th("Would-be net", 'right') }}</tr>
+  {% for row in s.by_source %}
+  <tr>{{ m.td(row.source) }}{{ m.td(row.count, 'right') }}{{ m.td(row.target_hits, 'right') }}{{ m.td(row.sl_hits, 'right') }}{{ m.td(row.hypothetical_net|inr(2, true), 'right', row.hypothetical_net|pnl_color) }}</tr>
+  {% endfor %}
+</table>
+</div>
+<p style="margin:6px 0 0 0;font-size:11px;color:#6b6a66;">Today: {{ s.total }} shadow setups ({{ s.open }} still open). A positive would-be net on rows rejected by USER/TIMEOUT means my rejections cost money.</p>
+{% else %}
+<p style="margin:4px 0;color:#6b6a66;">No shadow-tracked setups today.</p>
+{% endif %}
+{% if s.cumulative_by_source %}
+<p style="margin:8px 0 0 0;font-size:12px;color:#52514e;">Batch to date (closed shadows): {% for row in s.cumulative_by_source %}{{ row.source }} {{ row.closed }} closed, {{ row.target_hits }} target / {{ row.sl_hits }} SL, {{ row.hypothetical_net|inr(2, true) }}{% if not loop.last %} &middot; {% endif %}{% endfor %}</p>
+{% endif %}
+
+{{ m.section("Agent failures") }}
+{% if r.agent_failures.by_agent %}
+<ul style="margin:4px 0;padding-left:18px;">
+  {% for f in r.agent_failures.by_agent %}
+  <li style="margin:3px 0;"><strong>{{ f.agent }}</strong>: {{ f.count }} failure{{ "s" if f.count != 1 else "" }} ({{ f.symbols[:5]|join(", ") }}{% if f.symbols|length > 5 %}, ...{% endif %}){% if f.last_error %} &mdash; <span style="color:#52514e;">{{ f.last_error[:160] }}</span>{% endif %}</li>
+  {% endfor %}
+</ul>
+<p style="margin:4px 0;font-size:11px;color:#6b6a66;">Failed agents vote NEUTRAL; their trades were not blocked by the failure itself.</p>
+{% else %}
+<p style="margin:4px 0;color:#6b6a66;">No agent failures today.</p>
+{% endif %}
+{% endblock %}

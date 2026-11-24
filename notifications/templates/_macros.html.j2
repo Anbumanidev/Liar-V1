@@ -1,0 +1,55 @@
+{# Reusable e-mail building blocks. Inline CSS only (e-mail clients strip <style> often). #}
+
+{% macro section(title) -%}
+<h2 style="margin:20px 0 8px 0;font-size:15px;font-weight:700;color:#0b0b0b;border-bottom:1px solid #e2e1dc;padding-bottom:4px;">{{ title }}</h2>
+{%- endmacro %}
+
+{# rows: list of (label, value) or (label, value, color) tuples #}
+{% macro kv(rows) -%}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+  {% for row in rows %}
+  <tr>
+    <td style="padding:5px 8px 5px 0;color:#52514e;font-size:13px;width:45%;vertical-align:top;border-bottom:1px solid #f1f1ef;">{{ row[0] }}</td>
+    <td style="padding:5px 0;font-size:14px;font-weight:600;vertical-align:top;border-bottom:1px solid #f1f1ef;{% if row|length > 2 and row[2] %}color:{{ row[2] }};{% else %}color:#0b0b0b;{% endif %}">{{ row[1] }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{%- endmacro %}
+
+{# Big headline numbers: items = list of (label, value, color|None) #}
+{% macro tiles(items) -%}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-spacing:0 6px;">
+  <tr>
+  {% for item in items %}
+    <td class="stack" style="padding:10px;background:#f7f7f5;border:1px solid #e2e1dc;border-radius:6px;vertical-align:top;width:{{ (100 / (items|length))|round(0, 'floor')|int }}%;">
+      <div style="font-size:11px;color:#52514e;text-transform:uppercase;letter-spacing:0.05em;">{{ item[0] }}</div>
+      <div style="font-size:18px;font-weight:700;margin-top:2px;color:{{ item[2] if item|length > 2 and item[2] else '#0b0b0b' }};">{{ item[1] }}</div>
+    </td>
+  {% endfor %}
+  </tr>
+</table>
+{%- endmacro %}
+
+{% macro bullets(items, color) -%}
+<ul style="margin:4px 0 8px 0;padding-left:18px;">
+  {% for it in items %}
+  <li style="margin:3px 0;color:#0b0b0b;"><span style="color:{{ color }};font-weight:700;">&#9632;</span> {{ it }}</li>
+  {% else %}
+  <li style="margin:3px 0;color:#6b6a66;list-style:none;">none recorded</li>
+  {% endfor %}
+</ul>
+{%- endmacro %}
+
+{% macro th(label, align='left') -%}
+<th style="padding:6px 6px;text-align:{{ align }};font-size:11px;color:#52514e;text-transform:uppercase;letter-spacing:0.04em;border-bottom:1px solid #c3c2b7;white-space:nowrap;">{{ label }}</th>
+{%- endmacro %}
+
+{% macro td(value, align='left', color=None, bold=False) -%}
+<td style="padding:6px 6px;text-align:{{ align }};font-size:13px;border-bottom:1px solid #f1f1ef;{% if color %}color:{{ color }};{% endif %}{% if bold %}font-weight:700;{% endif %}">{{ value }}</td>
+{%- endmacro %}
+
+{% macro note(text, tone='info') -%}
+{% set bg = {'info': '#eef4fc', 'warn': '#fff4e0', 'danger': '#fdeceb'}[tone] %}
+{% set bd = {'info': '#2a78d6', 'warn': '#c98500', 'danger': '#c0262d'}[tone] %}
+<div style="margin:12px 0;padding:10px 12px;background:{{ bg }};border-left:4px solid {{ bd }};border-radius:4px;font-size:13px;color:#0b0b0b;">{{ text }}</div>
+{%- endmacro %}

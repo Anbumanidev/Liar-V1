@@ -1,0 +1,37 @@
+{% extends "_base.html.j2" %}
+{% import "_macros.html.j2" as m %}
+{% block content %}
+{{ m.tiles([
+  ("Net P&L", x.net|inr(2, true), x.net|pnl_color),
+  ("Gross", x.gross|inr(2, true), x.gross|pnl_color),
+  ("Charges", x.charges|inr, None),
+]) }}
+
+{{ m.section("Trade") }}
+{{ m.kv([
+  ("Symbol", x.symbol),
+  ("Mode / product", x.mode ~ " / " ~ x.product),
+  ("Direction", x.direction),
+  ("Quantity", (x.qty|num(0)) ~ (" (partial exit)" if x.is_partial else "")),
+  ("Exit reason", x.exit_reason_label ~ " [" ~ x.exit_reason ~ "]"),
+  ("Entry", (x.entry_price|price) ~ " @ " ~ (x.entry_time|dt)),
+  ("Exit", (x.exit_price|price) ~ " @ " ~ (x.exit_time|dt)),
+  ("Holding time", x.holding ~ ((" (" ~ x.holding_days ~ " trading days)") if x.holding_days else "")),
+  ("Return on entry value", x.return_pct|pct(2, true), x.return_pct|pnl_color),
+  ("R multiple", (x.r_multiple|num(2, true)) ~ "R" if x.r_multiple is not none else DASH, x.r_multiple|pnl_color),
+  ("Initial stop-loss", x.stop_loss|price),
+  ("Strategy", x.strategy or DASH),
+  ("Grade / regime", (x.grade or DASH) ~ " / " ~ (x.regime or DASH)),
+  ("Source", x.source),
+]) }}
+
+{% if x.charges_breakdown %}
+{{ m.section("Charges breakdown") }}
+<table role="presentation" class="tbl" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+  {% for item in x.charges_breakdown %}
+  <tr>{{ m.td(item[0]) }}{{ m.td(item[1]|inr(4 if item[1] < 1 else 2), 'right') }}</tr>
+  {% endfor %}
+</table>
+{% endif %}
+<p style="margin:12px 0 0 0;font-size:12px;color:#6b6a66;">Trade #{{ x.trade_id }} &middot; position #{{ x.position_id }}. Net P&amp;L = gross &minus; (entry charges + exit charges).</p>
+{% endblock %}
