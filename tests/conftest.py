@@ -14,10 +14,15 @@ JSONL logs are redirected to a temp dir for every test (autouse).
 from __future__ import annotations
 
 import os
+import tempfile
 from collections.abc import Iterator
 from datetime import datetime
 
-import pytest
+# Anything that loads Secrets during the test run (bootstrap(), replays) must never write into
+# the live logs/ folder: point LOG_DIR at a throw-away directory before any test module imports.
+os.environ.setdefault("LOG_DIR", tempfile.mkdtemp(prefix="liar-test-logs-"))
+
+import pytest  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker
 
 from config.loader import load_default_settings, load_hard_caps

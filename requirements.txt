@@ -39,7 +39,12 @@ torch==2.12.1
 # Scheduler / notifications
 APScheduler==3.11.3
 
-# Dashboard
+# Web dashboard (main, HTML/JS) - chart library vendored in webui/static/vendor (Apache-2.0)
+fastapi==0.142.1
+uvicorn==0.54.0
+itsdangerous==2.2.0
+
+# Advanced console (Streamlit)
 streamlit==1.67.0
 streamlit-authenticator==0.4.2
 streamlit-autorefresh==1.0.1

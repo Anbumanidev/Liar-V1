@@ -18,7 +18,7 @@ gap_buffer_pct: 3.0                # overnight risk = max(SL risk, qty*entry*gap
 avoid_events_in_window: true
 avoid_event_types: [RESULTS, BOARD_MEETING, EX_DIVIDEND, EX_DATE, SPLIT, BONUS, RIGHTS]
 circuit_buffer_pct: 2.0            # reject if within 2% of upper/lower circuit
-sl_min_atr: 0.3
+sl_min_atr: 0.8                    # was 0.3: a 0.6-ATR stop on 5m bars is noise (BEL 2026-11-25: stopped in 3 min)
 sl_max_atr: 3.0
 max_charges_pct_of_value: 1.0      # reject if round-trip charges > 1% of position value
 max_correlation: 0.7
@@ -38,3 +38,12 @@ drawdown:
 intraday_daily_profit_lock_pct: 2.0   # after +2% of trading capital: only A+ at half size
 intraday_profit_giveback_pct: 50.0    # stop intraday if open profit falls back 50% from day peak
 stale_price_seconds: 300
+
+# ---- execution-quality gates (added after the 2026-11-25 post-mortem; system trades only)
+max_failed_agents_pct: 34          # AGENT_QUORUM: refuse when more than this % of LLM agents failed
+debate_veto_enabled: true          # DEBATE_AGAINST: refuse when the bear clearly won the debate
+max_debate_deficit: 10             #   ... bear conviction - bull conviction >= this
+max_entry_drift_atr: 1.0           # PRICE_MOVED: live price more than this x ATR from the planned entry
+live_rr_tolerance: 0.8             # PRICE_MOVED: R:R at the live price must be >= mode min_rr x this
+min_room_r: 1.0                    # NO_ROOM: nearest opposing level must be >= 1R away (0 = off)
+fill_rr_min: 1.0                   # paper fill: skip the entry if R:R to T1 at the fill price < this

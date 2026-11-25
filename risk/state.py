@@ -56,6 +56,7 @@ class RiskState(BaseModel):
     correlations: dict[str, float] = Field(default_factory=dict)       # open symbol -> corr with candidate
     quote_age_seconds: float | None = None
     atr: float | None = None                                           # fallback ATR (manual trades)
+    last_sl_exit: dict[str, datetime] = Field(default_factory=dict)    # "SYMBOL:MODE" -> last stop-loss exit
 
     def mode_state(self, mode: Mode) -> ModeStateView:
         return self.mode_states.get(Mode(mode), ModeStateView())
@@ -109,6 +110,16 @@ def realized_by_mode(session: Session, batch_id: int, day: date) -> dict[Mode, f
         .group_by(Trade.mode)
     ).all()
     return {Mode(m): float(v) for m, v in rows}
+
+
+def last_stop_exits(session: Session, batch_id: int, since: datetime) -> dict[str, datetime]:
+    """Most recent stop-loss exit per ``SYMBOL:MODE`` since ``since`` (re-entry cooldown)."""
+    rows = session.execute(
+        select(Trade.symbol, Trade.mode, func.max(Trade.exit_time))
+        .where(Trade.batch_id == batch_id, Trade.exit_time >= since, Trade.exit_reason.in_(("SL", "GAP")))
+        .group_by(Trade.symbol, Trade.mode)
+    ).all()
+    return {f"{sym}:{mode}": to_ist(ts) for sym, mode, ts in rows if ts is not None}
 
 
 def disabled_strategy_keys(session: Session, batch_id: int) -> tuple[set[str], dict[str, float]]:
@@ -209,4 +220,5 @@ def build_risk_state(
         kelly_fractions=kelly,
         correlations=correlations,
         quote_age_seconds=quote_age,
+        last_sl_exit=last_stop_exits(session, batch_id, now - timedelta(days=7)),
     )

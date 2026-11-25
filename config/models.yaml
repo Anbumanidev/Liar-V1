@@ -9,19 +9,26 @@
 ollama_host: "http://127.0.0.1:11434"
 active_profile: low
 profiles:
-  low:
-    reasoning: "qwen3:8b"      # Bull, Bear, Meta  (~5.2 GB Q4_K_M)
-    sub_agent: "qwen3:4b"      # Layer-1 specialists (~2.6 GB)
+  low:                         # 6 GB GPU: ONE model for every role -> no model swapping
+    reasoning: "qwen3:4b"      # Bull, Bear, Meta (~2.6 GB)
+    sub_agent: "qwen3:4b"      # Layer-1 specialists
+    # 2026-11-25: with qwen3:8b (5.2 GB) + qwen3:4b (2.6 GB) on a 6 GB card Ollama kept
+    # swapping models; 76% of agent calls timed out and cycles took 3-21 minutes.
+  balanced:                    # >= 10 GB VRAM
+    reasoning: "qwen3:8b"
+    sub_agent: "qwen3:4b"
   high:
     reasoning: "qwen3:14b"     # ~9.3 GB
     sub_agent: "qwen3:8b"
 assignments: {}                # per-agent override, e.g. {meta: "qwen3:14b"}
 finbert_model: "ProsusAI/finbert"
-finbert_device: auto           # auto | cpu | cuda
+finbert_device: cpu            # auto | cpu | cuda  (cpu: leave the 6 GB GPU to the LLM)
 temperature: 0.2
-num_ctx: 8192
-request_timeout_seconds: 120
+num_ctx: 6144                  # largest prompt seen: ~3.7k tokens (technical agent)
+request_timeout_seconds: 90
 max_retries: 2                 # retry invalid JSON up to 2 times, then agent = FAILED (neutral vote)
+timeout_retries: 1             # a timed-out call is retried once (not 3x: that only grows the queue)
+max_concurrent_requests: 2     # in-flight LLM calls per process (match OLLAMA_NUM_PARALLEL)
 keep_alive: "15m"
 reasoning_think: false         # Qwen3 "thinking" for reasoning roles (slower; off on 6 GB GPUs)
 latency_warn_seconds: 60       # warn if one stock's full cycle exceeds this

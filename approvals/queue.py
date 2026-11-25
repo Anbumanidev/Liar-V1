@@ -143,6 +143,14 @@ class ApprovalQueue:
     def _execute(self, session: Session, item: ApprovalItem, proposal: TradeProposal, *, actor: str,
                  status: ApprovalStatus, edits: dict[str, Any] | None, reason: str | None) -> CommandResult:
         state = self._state(session, item)
+        if self.data is not None and self._check_timing(proposal.mode):
+            # Re-price at the live quote: the stored one is as old as the analysis + the wait.
+            try:
+                q = self.data.quote(proposal.symbol)
+                if q is not None and q.ltp and q.ltp > 0:
+                    proposal = proposal.model_copy(update={"ltp": float(q.ltp), "ltp_at": q.timestamp})
+            except Exception as exc:  # noqa: BLE001 - keep the stored quote
+                logger.warning(f"[approvals] live quote {proposal.symbol}: {exc}")
         verdict = self.risk.evaluate(proposal, state, check_timing=self._check_timing(proposal.mode))
         now = to_ist(self.clock.now())
         if not verdict.approved:

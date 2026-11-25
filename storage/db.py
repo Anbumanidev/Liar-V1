@@ -23,7 +23,7 @@ def _sqlite_pragmas(dbapi_conn: Any, _record: Any) -> None:
     cur.execute("PRAGMA journal_mode=WAL")
     cur.execute("PRAGMA synchronous=NORMAL")
     cur.execute("PRAGMA foreign_keys=OFF")
-    cur.execute("PRAGMA busy_timeout=10000")
+    cur.execute("PRAGMA busy_timeout=30000")   # engine + dashboards share the file; wait, don't fail
     cur.close()
 
 

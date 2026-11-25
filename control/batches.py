@@ -15,6 +15,7 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from capital.funding import batch_equity, record_funding
 from config.loader import settings_to_dict
 from config.store import revert_to
 from control.payloads import CloseBatchPayload, CommandResult, NewBatchPayload, ResumeHaltPayload
@@ -27,8 +28,10 @@ from storage.models import ApprovalItem, Batch, Order, Position
 CONFIRM = "CONFIRM"
 
 
-def create_batch(session: Session, services: Any, *, name: str, starting_capital: float, actor: str) -> Batch:
-    """Create an ACTIVE batch with a settings snapshot and an initialised capital account."""
+def create_batch(session: Session, services: Any, *, name: str, starting_capital: float, actor: str,
+                 prev_batch: Batch | None = None, prev_equity: float | None = None) -> Batch:
+    """Create an ACTIVE batch with a settings snapshot, an initialised capital account and the
+    owner funding record (INITIAL, or TOP_UP / WITHDRAW = starting capital - carried equity)."""
     now = services.clock.now()
     batch = Batch(name=name, starting_capital=float(starting_capital), status=BatchStatus.ACTIVE.value,
                   settings_version_id=services.ctx.settings_version_id, created_at=now, started_at=now,
@@ -36,24 +39,36 @@ def create_batch(session: Session, services: Any, *, name: str, starting_capital
     session.add(batch)
     session.flush()
     services.capital.initialize_batch(session, batch.id, float(starting_capital))
-    audit(session, actor, "BATCH_CREATE", f"batch:{batch.id}", {"name": name, "starting_capital": starting_capital},
-          batch_id=batch.id, clock=services.clock)
-    log_event("control", {"event": "batch_created", "batch_id": batch.id, "name": name}, clock=services.clock)
+    ev = record_funding(session, batch=batch, prev_batch=prev_batch, prev_equity=prev_equity, now=now, actor=actor)
+    audit(session, actor, "BATCH_CREATE", f"batch:{batch.id}",
+          {"name": name, "starting_capital": starting_capital, "funding": ev.kind, "top_up": round(ev.amount, 2),
+           "carried_in": ev.prev_equity}, batch_id=batch.id, clock=services.clock)
+    log_event("control", {"event": "batch_created", "batch_id": batch.id, "name": name,
+                          "starting_capital": starting_capital, "funding": ev.kind, "top_up": round(ev.amount, 2),
+                          "carried_in": ev.prev_equity}, clock=services.clock)
     return batch
 
 
-def ensure_current_batch(session: Session, services: Any, *, actor: str = "system") -> Batch:
-    """Return the current batch, creating 'Batch 1' (starting capital from settings) if none exists."""
-    batch = get_current_batch(session)
-    if batch is not None:
-        return batch
+def next_batch_name(session: Session) -> str:
+    """First free "Batch N" name."""
     n = len(list(session.execute(select(Batch.id)).scalars())) + 1
     name = f"Batch {n}"
     while session.execute(select(Batch.id).where(Batch.name == name)).first() is not None:
         n += 1
         name = f"Batch {n}"
-    return create_batch(session, services, name=name, starting_capital=services.settings.capital.starting_capital,
-                        actor=actor)
+    return name
+
+
+def ensure_current_batch(session: Session, services: Any, *, actor: str = "system") -> Batch:
+    """Return the current batch, creating one (starting capital from settings) if none exists."""
+    batch = get_current_batch(session)
+    if batch is not None:
+        return batch
+    prev = session.execute(select(Batch).order_by(Batch.id.desc())).scalars().first()
+    prev_equity = batch_equity(session, prev.id)["equity"] if prev is not None else None
+    return create_batch(session, services, name=next_batch_name(session),
+                        starting_capital=services.settings.capital.starting_capital, actor=actor,
+                        prev_batch=prev, prev_equity=prev_equity)
 
 
 def _cancel_open_work(session: Session, batch_id: int, reason: str, services: Any) -> tuple[int, int]:
@@ -84,8 +99,10 @@ def start_new_batch(session: Session, payload: NewBatchPayload, services: Any, *
     expected = {CONFIRM} | ({current.name} if current is not None else set())
     if payload.confirm_text.strip() not in expected:
         return CommandResult(ok=False, message="confirmation text must be CONFIRM or the current batch name")
-    if session.execute(select(Batch.id).where(Batch.name == payload.name)).first() is not None:
-        return CommandResult(ok=False, message=f"a batch named {payload.name!r} already exists")
+    name = (payload.name or "").strip() or next_batch_name(session)
+    starting_capital = float(payload.starting_capital or services.settings.capital.starting_capital)
+    if session.execute(select(Batch.id).where(Batch.name == name)).first() is not None:
+        return CommandResult(ok=False, message=f"a batch named {name!r} already exists")
     if payload.copy_settings_from_version_id is not None:
         try:
             revert_to(session, payload.copy_settings_from_version_id, services.caps, author=actor,
@@ -94,6 +111,7 @@ def start_new_batch(session: Session, payload: NewBatchPayload, services: Any, *
         except Exception as exc:  # noqa: BLE001
             return CommandResult(ok=False, message=f"could not copy settings version: {exc}")
     exits = 0
+    prev_equity: float | None = None
     if current is not None:
         market_open = _market_open(services)
         run_cnc = payload.open_cnc_handling == "RUN_TO_COMPLETION"
@@ -109,12 +127,21 @@ def start_new_batch(session: Session, payload: NewBatchPayload, services: Any, *
         audit(session, actor, "BATCH_ARCHIVE", f"batch:{current.id}",
               {"status": current.status, "exits": exits, "cnc_handling": payload.open_cnc_handling},
               batch_id=current.id, clock=services.clock)
-    batch = create_batch(session, services, name=payload.name, starting_capital=payload.starting_capital, actor=actor)
+        session.flush()
+        prev_equity = batch_equity(session, current.id)["equity"]
+    batch = create_batch(session, services, name=name, starting_capital=starting_capital, actor=actor,
+                         prev_batch=current, prev_equity=prev_equity)
     services.ctx.batch_id = batch.id
     if services.notifier is not None:
         services.notifier.batch_id = batch.id
-    return CommandResult(ok=True, message=f"batch {batch.name} started (old batch: {current.status if current else '-'})",
-                         data={"batch_id": batch.id, "exits": exits})
+    top_up = starting_capital - prev_equity if prev_equity is not None else starting_capital
+    money = (f"added ₹{top_up:,.2f}" if top_up > 0.005 else
+             f"withdrew ₹{-top_up:,.2f}" if top_up < -0.005 else "no top-up needed")
+    return CommandResult(ok=True, message=(f"batch {batch.name} started with ₹{starting_capital:,.2f} ({money}; "
+                                           f"old batch: {current.status if current else '-'})"),
+                         data={"batch_id": batch.id, "exits": exits, "starting_capital": starting_capital,
+                               "top_up": round(top_up, 2),
+                               "carried_in": round(prev_equity, 2) if prev_equity is not None else None})
 
 
 def close_batch(session: Session, payload: CloseBatchPayload, services: Any, *, actor: str) -> CommandResult:

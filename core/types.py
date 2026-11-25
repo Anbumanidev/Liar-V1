@@ -316,6 +316,7 @@ class ConfluenceResult(_Model):
     grade: Grade
     components: dict[str, float] = Field(default_factory=dict)  # component -> points
     notes: list[str] = Field(default_factory=list)
+    room_r: float | None = None   # distance to the nearest opposing level in R (None = none found)
 
 
 # --------------------------------------------------------------------------- agent I/O
@@ -494,7 +495,14 @@ class TradeProposal(_Model):
     events_in_window: list[MarketEvent] = Field(default_factory=list)
     decision_id: int | None = None
     approval_id: int | None = None
-    created_at: datetime
+    created_at: datetime                      # when the analysed data was read (signal age is measured from here)
+    # ---- execution-quality inputs (system trades; None = not applicable / unknown -> rule skipped)
+    valid_until: datetime | None = None       # strategy signal validity
+    failed_agents_pct: float | None = None    # % of voting LLM agents that FAILED
+    debate_bull: int | None = None            # bull conviction 0-100
+    debate_bear: int | None = None            # bear conviction 0-100
+    room_r: float | None = None               # nearest opposing level, in R from the entry
+    ltp_at: datetime | None = None            # timestamp of ``ltp`` (fresh quote at risk time)
 
     @field_validator("symbol")
     @classmethod

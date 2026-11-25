@@ -12,3 +12,5 @@ heartbeat_stale_seconds: 30
 watchlist_ranking: true           # INTRADAY: analyse the "stocks in play" first (RVOL, gap, range, RS)
 ranking_refresh_minutes: 15
 market_context_cache_minutes: 5
+max_llm_candidates_per_cycle: 2   # only the best 2 setups of a cycle (by confluence) go to the LLM agents
+cycle_llm_budget_seconds: 240     # stop starting LLM analyses after 4 min so a 5-min cycle never overlaps

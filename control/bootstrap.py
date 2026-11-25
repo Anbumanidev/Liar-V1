@@ -150,7 +150,12 @@ def bootstrap(
     secrets = secrets or load_secrets()
     runtime_dir = Path(runtime_dir or secrets.runtime_dir)
     runtime_dir.mkdir(parents=True, exist_ok=True)
-    log_dir = Path(log_dir or secrets.log_dir)
+    if log_dir is None:
+        # Replays (and their simulated dates) never write into the live day folders: on
+        # 2026-11-25 test replays put fake INFY trades into logs/2026-11-25/trades.jsonl and
+        # a future logs/2026-11-26 folder. They go to logs/replay/ instead.
+        log_dir = Path(secrets.log_dir) / "replay" if is_replay else Path(secrets.log_dir)
+    log_dir = Path(log_dir)
     setup_logging(process_name=process, log_dir=log_dir, console=console_log)
     set_log_dir(log_dir)
     caps = load_hard_caps()

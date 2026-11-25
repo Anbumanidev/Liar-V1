@@ -22,7 +22,7 @@ modes:
     approval_timeout_minutes: 3
     timeframes: ["5m", "15m", "1h"]
     primary_timeframe: "5m"
-    entry_windows: [{start: "09:30", end: "14:45"}]
+    entry_windows: [{start: "09:30", end: "11:45"}, {start: "13:15", end: "14:45"}]   # midday lull skipped (all 3 losses of 2026-11-25 were 11:24-12:56)
     max_trades_per_day: 3
     min_holding_days: 0
     max_holding_days: 0
@@ -43,6 +43,8 @@ modes:
     consecutive_loss_pause_minutes: 60
     consecutive_loss_pause_days: 0
     max_symbols_per_cycle: 10
+    reentry_cooldown_minutes: 60          # no re-entry in a symbol for 60 min after its stop-loss
+    max_signal_age_minutes: 6             # never execute a decision older than ~1 bar of 5m data
     agent_weights:
       fundamental: 0.5
       technical: 1.5
@@ -81,6 +83,8 @@ modes:
     consecutive_loss_pause_minutes: 0
     consecutive_loss_pause_days: 1
     max_symbols_per_cycle: 15
+    reentry_cooldown_minutes: 1440
+    max_signal_age_minutes: 15
     agent_weights:
       fundamental: 0.8
       technical: 1.2
@@ -118,6 +122,7 @@ modes:
     consecutive_loss_pause_minutes: 0
     consecutive_loss_pause_days: 1
     max_symbols_per_cycle: 60
+    reentry_cooldown_minutes: 2880        # 2 days after a stop-loss
     agent_weights:
       fundamental: 1.2
       technical: 1.3
@@ -155,6 +160,7 @@ modes:
     consecutive_loss_pause_minutes: 0
     consecutive_loss_pause_days: 1
     max_symbols_per_cycle: 100
+    reentry_cooldown_minutes: 7200        # 5 days after a stop-loss
     agent_weights:
       fundamental: 1.6
       technical: 1.2

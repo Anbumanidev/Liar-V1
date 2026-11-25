@@ -70,7 +70,7 @@ def env(settings: Settings, caps: HardCaps, session):  # type: ignore[no-untyped
 def proposal(env, **kw) -> TradeProposal:  # type: ignore[no-untyped-def]
     base = dict(batch_id=env.batch_id, symbol="INFY", mode=Mode.INTRADAY, direction=Direction.LONG,
                 entry_price=100.0, entry_type=EntryType.LIMIT, stop_loss=99.0, target_1=101.5, target_2=103.0,
-                strategy="vwap_pullback", confidence=80, confluence_score=75.0, grade=Grade.A, atr=1.5,
+                strategy="vwap_pullback", confidence=80, confluence_score=75.0, grade=Grade.A, atr=1.0,
                 sector="IT", created_at=env.clock.now())
     base.update(kw)
     return TradeProposal(**base)
@@ -122,12 +122,12 @@ def test_modify_qty_capped_by_risk_max(env) -> None:  # type: ignore[no-untyped-
     res = env.queue.modify_and_approve(env.session, ModifyApprovePayload(approval_id=item.id, qty=item.max_qty + 5),
                                        actor="owner")
     assert not res.ok and res.rule == RiskRule.QTY_ABOVE_MAX
-    res = env.queue.modify_and_approve(env.session, ModifyApprovePayload(approval_id=item.id, qty=1, stop_loss=99.3,
+    res = env.queue.modify_and_approve(env.session, ModifyApprovePayload(approval_id=item.id, qty=1, stop_loss=99.2,
                                                                          reason="smaller"), actor="owner")
     assert res.ok, res.message
     assert item.status == ApprovalStatus.MODIFIED.value
     assert item.user_edits_json["qty"] == {"old": item.qty, "new": 1}
-    assert item.user_edits_json["stop_loss"]["new"] == 99.3
+    assert item.user_edits_json["stop_loss"]["new"] == 99.2
 
 
 def test_modify_to_short_in_swing_is_blocked(env) -> None:  # type: ignore[no-untyped-def]

@@ -22,6 +22,7 @@ from control.processor import CommandProcessor
 from control.status import heartbeat, set_engine_state
 from core.clock import IST, to_ist
 from core.enums import EngineState
+from core.logging import log_event
 from scheduler.jobs import run_job
 from scheduler.plan import DailyPlan
 
@@ -42,6 +43,13 @@ class TradingEngine:
         self._last_shadow = 0.0
         self._last_health = 0.0
         self._health: dict[str, bool | None] = {"data": None, "llm": None}
+        # One running instance per job NAME. Each cron slot is its own APScheduler job id
+        # ("intraday_cycle@1110", "@1115", ...), so APScheduler's max_instances cannot stop a
+        # slow 11:10 cycle from overlapping the 11:15 one - that overlap multiplied the LLM queue
+        # and SQLite lock contention on 2026-11-25. A busy job's next slot is skipped and logged.
+        self._job_locks: dict[str, threading.Lock] = {}
+        self._job_locks_guard = threading.Lock()
+        self.skipped_jobs: dict[str, int] = {}
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -85,18 +93,36 @@ class TradingEngine:
     LOCKED_JOBS = frozenset({"premarket", "watchlist", "preopen_check", "squareoff", "cnc_time_stop", "eod",
                              "eod_report"})
 
+    def _job_lock(self, job: str) -> threading.Lock:
+        with self._job_locks_guard:
+            lock = self._job_locks.get(job)
+            if lock is None:
+                lock = self._job_locks[job] = threading.Lock()
+            return lock
+
     def _fire(self, job: str) -> None:
-        logger.info(f"[engine] job {job} start")
-        with self.svc.session() as s:
-            heartbeat(s, now=self.svc.clock.now(), batch_id=self.svc.ctx.batch_id,
-                      settings_version_id=self.svc.ctx.settings_version_id, activity=f"job {job}")
-            s.commit()
-        if job in self.LOCKED_JOBS:
-            with self._lock:
+        lock = self._job_lock(job)
+        if not lock.acquire(blocking=False):
+            self.skipped_jobs[job] = self.skipped_jobs.get(job, 0) + 1
+            logger.warning(f"[engine] job {job} skipped: the previous {job} is still running "
+                           f"({self.skipped_jobs[job]} skipped today)")
+            log_event("scans", {"event": "cycle_skipped", "job": job, "reason": "previous run still in progress",
+                                "skipped_total": self.skipped_jobs[job]}, clock=self.svc.clock)
+            return
+        try:
+            logger.info(f"[engine] job {job} start")
+            with self.svc.session() as s:
+                heartbeat(s, now=self.svc.clock.now(), batch_id=self.svc.ctx.batch_id,
+                          settings_version_id=self.svc.ctx.settings_version_id, activity=f"job {job}")
+                s.commit()
+            if job in self.LOCKED_JOBS:
+                with self._lock:
+                    res = run_job(self.svc, job)
+            else:
                 res = run_job(self.svc, job)
-        else:
-            res = run_job(self.svc, job)
-        logger.info(f"[engine] job {job} done: {res}")
+            logger.info(f"[engine] job {job} done: {res}")
+        finally:
+            lock.release()
 
     def _next_cycle(self, now: datetime) -> datetime | None:
         plan = DailyPlan(self.svc.settings)

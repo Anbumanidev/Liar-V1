@@ -119,6 +119,22 @@ class PipelineState(TypedDict, total=False):
 
 
 @dataclass
+class ScreenHandle:
+    """A symbol screened by ``AnalysisPipeline.screen`` (paused before the LLM, or finished)."""
+
+    symbol: str
+    mode: Mode
+    cfg: dict[str, Any]
+    t0: float
+    confluence: float = 0.0
+    result: "PipelineResult | None" = None   # set when the pre-filter already finished it
+
+    @property
+    def pending(self) -> bool:
+        return self.result is None
+
+
+@dataclass
 class PipelineResult:
     """What ``AnalysisPipeline.analyze`` returns."""
 
@@ -167,13 +183,14 @@ class AnalysisPipeline:
     def __init__(self, services: PipelineServices) -> None:
         self.s = services
         self._graph = self._build_graph()
+        self._screen_graph = self._build_graph(interrupt_before_agents=True)
 
     def update_settings(self, settings: Settings) -> None:
         self.s.settings = settings
 
     # ------------------------------------------------------------------ graph
 
-    def _build_graph(self) -> Any:
+    def _build_graph(self, *, interrupt_before_agents: bool = False) -> Any:
         from langgraph.checkpoint.memory import InMemorySaver
         from langgraph.graph import END, START, StateGraph
 
@@ -197,7 +214,16 @@ class AnalysisPipeline:
         g.add_edge("risk", "persist")
         g.add_edge("persist", "route")
         g.add_edge("route", END)
-        return g.compile(checkpointer=InMemorySaver())
+        return g.compile(checkpointer=InMemorySaver(),
+                         interrupt_before=["agents"] if interrupt_before_agents else None)
+
+    @staticmethod
+    def _forget(graph: Any, cfg: dict[str, Any]) -> None:
+        """Drop a finished thread's checkpoints (the in-memory saver otherwise grows all day)."""
+        try:
+            graph.checkpointer.delete_thread(cfg["configurable"]["thread_id"])
+        except Exception:  # noqa: BLE001 - best effort
+            pass
 
     @staticmethod
     def _after_meta(st: PipelineState) -> str:
@@ -240,16 +266,76 @@ class AnalysisPipeline:
                 session.commit()
             return PipelineResult(sym, Mode(mode), None, FINAL_NO_TRADE, error=str(exc),
                                   latency_ms=int((time.perf_counter() - t0) * 1000))
+        self._forget(self._graph, cfg)
+        return self._result(sym, Mode(mode), out, t0)
+
+    def _result(self, sym: str, mode: Mode, out: PipelineState, t0: float) -> PipelineResult:
         latency = int((time.perf_counter() - t0) * 1000)
         if latency > self.s.settings.models.latency_warn_seconds * 1000:
-            logger.warning(f"[pipeline] {sym} {Mode(mode).value} full cycle took {latency / 1000:.1f}s "
+            logger.warning(f"[pipeline] {sym} {mode.value} full cycle took {latency / 1000:.1f}s "
                            f"(> {self.s.settings.models.latency_warn_seconds:.0f}s)")
         return PipelineResult(
-            symbol=sym, mode=Mode(mode), decision_id=out.get("decision_id"),
+            symbol=sym, mode=mode, decision_id=out.get("decision_id"),
             final_action=out.get("final_action") or FINAL_NO_TRADE, meta=out.get("meta"),
             verdict=out.get("verdict"), confluence=out.get("confluence"),
             filtered_reason=out.get("filtered_reason"), error=out.get("error"), latency_ms=latency,
         )
+
+    # ------------------------------------------------------------------ two-phase cycle
+
+    def screen(self, symbol: str, mode: Mode, *, batch_id: int, run_id: int | None = None,
+               check_timing: bool = True) -> "ScreenHandle":
+        """Phase 1 of a cycle: data + deterministic strategies + confluence only (no LLM).
+
+        Setups that fail the pre-filter finish here (persisted as FILTERED, shadow-tracked) and
+        come back with ``handle.result`` set. Setups that pass pause before the LLM agents;
+        ``resume(handle)`` continues them, ``resume(handle, skip_reason=...)`` records them as
+        FILTERED with that reason instead. Never raises.
+        """
+        t0 = time.perf_counter()
+        sym = symbol.strip().upper()
+        m = Mode(mode)
+        state: PipelineState = {"symbol": sym, "mode": m.value, "batch_id": batch_id, "run_id": run_id,
+                                "force": False, "route": True, "check_timing": check_timing, "started": t0}
+        cfg = {"configurable": {"thread_id": f"screen:{run_id}:{sym}:{m.value}:{to_ist(self.s.clock.now()).isoformat()}"},
+               "recursion_limit": 25}
+        try:
+            out: PipelineState = self._screen_graph.invoke(state, config=cfg)
+            snap = self._screen_graph.get_state(cfg)
+        except Exception as exc:  # noqa: BLE001 - graceful degradation
+            logger.error(f"[pipeline] screen {sym} {m.value} crashed: {exc}")
+            with self._session() as session:
+                record_error(session, "agents.graph.screen", exc, {"symbol": sym, "mode": m.value},
+                             batch_id=batch_id, clock=self.s.clock)
+                session.commit()
+            res = PipelineResult(sym, m, None, FINAL_NO_TRADE, error=str(exc),
+                                 latency_ms=int((time.perf_counter() - t0) * 1000))
+            return ScreenHandle(symbol=sym, mode=m, cfg=cfg, t0=t0, result=res)
+        if snap.next and "agents" in snap.next:
+            conf = snap.values.get("confluence")
+            return ScreenHandle(symbol=sym, mode=m, cfg=cfg, t0=t0, confluence=conf.score if conf else 0.0)
+        self._forget(self._screen_graph, cfg)
+        return ScreenHandle(symbol=sym, mode=m, cfg=cfg, t0=t0, result=self._result(sym, m, out, t0))
+
+    def resume(self, handle: "ScreenHandle", *, skip_reason: str | None = None) -> PipelineResult:
+        """Phase 2: run the LLM agents for a screened setup, or file it as FILTERED. Never raises."""
+        if handle.result is not None:
+            return handle.result
+        g, cfg = self._screen_graph, handle.cfg
+        try:
+            if skip_reason:
+                g.update_state(cfg, {"filtered_reason": skip_reason}, as_node="strategies")
+            out: PipelineState = g.invoke(None, config=cfg)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[pipeline] resume {handle.symbol} {handle.mode.value} crashed: {exc}")
+            with self._session() as session:
+                record_error(session, "agents.graph.resume", exc, {"symbol": handle.symbol}, clock=self.s.clock)
+                session.commit()
+            return PipelineResult(handle.symbol, handle.mode, None, FINAL_NO_TRADE, error=str(exc),
+                                  latency_ms=int((time.perf_counter() - handle.t0) * 1000))
+        finally:
+            self._forget(g, cfg)
+        return self._result(handle.symbol, handle.mode, out, handle.t0 if not skip_reason else time.perf_counter())
 
     def _session(self) -> Session:
         return self.s.session_factory()
@@ -436,7 +522,22 @@ class AnalysisPipeline:
                                                    s.settings.mode(mode).max_holding_days or 1, s.calendar)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[pipeline] events for AUTO mode {mode.value}: {exc}")
+        # Fresh quote at decision time: the context quote is as old as the whole LLM analysis.
         quote = ctx.quote
+        try:
+            fresh = s.data.quote(ctx.symbol)
+            if fresh is not None and fresh.ltp and fresh.ltp > 0:
+                quote = fresh
+        except Exception as exc:  # noqa: BLE001 - fall back to the context quote
+            logger.warning(f"[pipeline] fresh quote {ctx.symbol}: {exc}")
+        signal = next((x for x in st.get("signals", []) if x.strategy == meta.strategy), st.get("best"))
+        reports = st.get("reports") or []
+        voting = [x for x in reports if x.status != AgentStatus.SKIPPED]
+        failed_pct = (100.0 * sum(1 for x in voting if x.status == AgentStatus.FAILED) / len(voting)) if voting else None
+        debate = st.get("debate")
+        bull = bear = None
+        if debate is not None and debate.status == AgentStatus.OK and debate.bull is not None and debate.bear is not None:
+            bull, bear = int(debate.bull.conviction), int(debate.bear.conviction)
         proposal = TradeProposal(
             batch_id=st["batch_id"], symbol=ctx.symbol, mode=mode, direction=direction,
             entry_price=float(meta.entry_price), entry_type=meta.entry_type, stop_loss=float(meta.stop_loss),
@@ -447,6 +548,11 @@ class AnalysisPipeline:
             trailing_rule=meta.trailing_rule, max_holding_days=meta.max_holding_days,
             upper_circuit=quote.upper_circuit if quote else None, lower_circuit=quote.lower_circuit if quote else None,
             ltp=quote.ltp if quote else None, events_in_window=events, created_at=ctx.as_of,
+            valid_until=signal.valid_until if signal is not None and mode == ctx.mode else None,
+            failed_agents_pct=round(failed_pct, 1) if failed_pct is not None else None,
+            debate_bull=bull, debate_bear=bear,
+            room_r=conf.room_r if conf is not None and mode == ctx.mode and signal is st.get("best") else None,
+            ltp_at=quote.timestamp if quote else None,
         )
         with self._session() as session:
             state = build_risk_state(session, batch_id=st["batch_id"], capital_manager=s.capital, clock=s.clock,

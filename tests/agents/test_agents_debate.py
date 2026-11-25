@@ -78,7 +78,7 @@ def test_debate_rounds_transcript_and_sides(settings: Settings, prompts: PromptS
     assert all(c["model"] == settings.models.model_for(c["agent"]) == settings.models.profiles["low"].reasoning
                for c in calls)
     assert all(c["think"] is True and c["schema"] == "DebateTurnOutput" for c in calls)
-    assert all(t["prompt_version"] == 1 and t["model"] == "qwen3:8b" for t in res.transcript)
+    assert all(t["prompt_version"] == 1 and t["model"] == settings.models.profiles["low"].reasoning for t in res.transcript)
 
 
 def test_rebuttals_see_the_opponents_latest_turn(settings: Settings, prompts: PromptStore, intraday: Any) -> None:

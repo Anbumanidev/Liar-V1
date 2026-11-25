@@ -234,3 +234,67 @@ def test_real_ollama_roundtrip(settings: Settings) -> None:  # pragma: no cover 
     res = llm.generate("technical", settings.models.model_for("technical"), "Answer JSON.",
                        'Return {"signal": "NEUTRAL", "confidence": 50}', Out)
     assert res.ok
+
+
+# --------------------------------------------------------------------------- overload protection
+
+
+def test_timeouts_are_retried_once_not_three_times() -> None:
+    from agents.llm import FakeLLMClient
+
+    fake = FakeLLMClient({"technical": [TimeoutError("timed out")] * 5}, max_retries=2)
+    fake.timeout_retries = 1   # what build_llm passes from settings.models.timeout_retries
+    fake.max_attempts = fake.max_retries + fake.timeout_retries + 1
+    res = fake.generate("technical", "m", "S", "U", Out)
+    assert not res.ok and res.attempts == 2 and len(fake.calls) == 2
+
+
+def test_invalid_answers_still_get_their_retries_with_a_timeout_budget() -> None:
+    from agents.llm import FakeLLMClient
+
+    fake = FakeLLMClient({"technical": [TimeoutError("t"), "not json", "still not json", VALID]}, max_retries=2)
+    fake.timeout_retries = 1
+    fake.max_attempts = fake.max_retries + fake.timeout_retries + 1
+    res = fake.generate("technical", "m", "S", "U", Out)
+    assert res.ok and res.attempts == 4
+
+
+def test_concurrency_cap_limits_in_flight_calls() -> None:
+    import threading
+    import time as _t
+
+    from agents.llm import _RetryingClient
+
+    class Slow(_RetryingClient):
+        def __init__(self) -> None:
+            super().__init__(max_retries=0, timeout_retries=0, max_concurrent=2)
+            self.active = 0
+            self.peak = 0
+            self.lock = threading.Lock()
+
+        def _chat(self, agent, model, messages, schema, temperature, think):  # type: ignore[no-untyped-def]
+            with self.lock:
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+            _t.sleep(0.05)
+            with self.lock:
+                self.active -= 1
+            return VALID, 1, 1
+
+    client = Slow()
+    threads = [threading.Thread(target=client.generate, args=(f"a{i}", "m", "S", "U", Out)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert client.peak == 2
+
+
+def test_build_llm_applies_overload_settings(settings) -> None:  # type: ignore[no-untyped-def]
+    from agents.llm import OllamaClient, build_llm
+
+    client = build_llm(settings)
+    assert isinstance(client, OllamaClient)
+    assert client.max_concurrent == settings.models.max_concurrent_requests == 2
+    assert client.timeout_retries == settings.models.timeout_retries == 1
+    assert client.max_attempts == settings.models.max_retries + 1 + 1

@@ -129,8 +129,8 @@ class ReserveTransferPayload(_P):
 
 
 class NewBatchPayload(_P):
-    name: str = Field(min_length=1, max_length=120)
-    starting_capital: float = Field(default=1000.0, gt=0)
+    name: str | None = Field(default=None, min_length=1, max_length=120)   # None = "Batch N"
+    starting_capital: float | None = Field(default=None, gt=0)            # None = capital.starting_capital
     copy_settings_from_version_id: int | None = None   # None = current settings
     open_cnc_handling: str = Field(default="EXIT", pattern="^(EXIT|RUN_TO_COMPLETION)$")
     confirm_text: str   # must be "CONFIRM" or the current batch name

@@ -138,6 +138,10 @@ class ModeConfig(_Cfg):
     consecutive_loss_pause_minutes: int = Field(default=60, ge=0)
     consecutive_loss_pause_days: int = Field(default=0, ge=0)
     max_symbols_per_cycle: int = Field(default=10, ge=1, le=200)
+    # No new entry in a symbol for N minutes after it was stopped out (0 = off). Stops revenge trades.
+    reentry_cooldown_minutes: int = Field(default=0, ge=0, le=7 * 24 * 60)
+    # A decision older than this (from the moment its data was read) is never executed (None = off).
+    max_signal_age_minutes: int | None = Field(default=None, ge=1, le=24 * 60)
 
     @field_validator("approval_until_next_session")
     @classmethod
@@ -245,6 +249,14 @@ class RiskSettings(_Cfg):
     intraday_daily_profit_lock_pct: float = Field(default=2.0, gt=0)
     intraday_profit_giveback_pct: float = Field(default=50.0, gt=0, le=100)
     stale_price_seconds: int = Field(default=300, ge=10)
+    # ---- execution-quality gates (added after the 2026-11-25 losses; see analytics/postmortem.py)
+    max_failed_agents_pct: float = Field(default=34.0, ge=0, le=100)   # AGENT_QUORUM: too many LLM agents failed
+    debate_veto_enabled: bool = True
+    max_debate_deficit: int = Field(default=10, ge=0, le=100)           # DEBATE_AGAINST: bear - bull conviction
+    max_entry_drift_atr: float = Field(default=1.0, ge=0)               # PRICE_MOVED: live price vs planned entry (0 = off)
+    live_rr_tolerance: float = Field(default=0.8, gt=0, le=1)           # R:R at the live price >= min_rr x this
+    min_room_r: float = Field(default=1.0, ge=0)                        # NO_ROOM: nearest opposing level in R (0 = off)
+    fill_rr_min: float = Field(default=1.0, ge=0)                       # cancel an entry if R:R at the fill price < this
 
     _v_times = field_validator(
         "intraday_no_entry_before", "intraday_no_entry_after", "intraday_squareoff", "conversion_cutoff"
@@ -332,6 +344,10 @@ class EngineSettings(_Cfg):
     watchlist_ranking: bool = True                 # rank intraday watchlist by "stocks in play" score
     ranking_refresh_minutes: int = Field(default=15, ge=5, le=120)
     market_context_cache_minutes: int = Field(default=5, ge=1, le=60)
+    # Only the best N setups of a cycle (by confluence) go to the LLM agents; the rest are logged as
+    # FILTERED with the reason. Keeps one 5-minute cycle inside 5 minutes on a 6 GB GPU.
+    max_llm_candidates_per_cycle: int = Field(default=2, ge=1, le=50)
+    cycle_llm_budget_seconds: int = Field(default=240, ge=30, le=3600)  # stop starting LLM analyses after this
 
 
 class ModelProfile(_Cfg):
@@ -352,6 +368,8 @@ class ModelsSettings(_Cfg):
     num_ctx: int = Field(default=8192, ge=1024)
     request_timeout_seconds: int = Field(default=120, ge=5)
     max_retries: int = Field(default=2, ge=0, le=5)
+    timeout_retries: int = Field(default=1, ge=0, le=5)          # retries after a timeout / network error
+    max_concurrent_requests: int = Field(default=2, ge=1, le=16)  # process-wide cap on in-flight LLM calls
     keep_alive: str = "15m"
     reasoning_think: bool = False
     latency_warn_seconds: float = Field(default=60.0, gt=0)

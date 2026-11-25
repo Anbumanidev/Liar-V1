@@ -392,6 +392,13 @@ class RiskRule(StrEnum):
     INVALID_PRICE = "INVALID_PRICE"
     CONVERSION_NOT_ALLOWED = "CONVERSION_NOT_ALLOWED"
     INSUFFICIENT_CASH = "INSUFFICIENT_CASH"
+    # ---- execution quality (added 2026-11-25 after three stale / chased / quorum-less losses)
+    SIGNAL_EXPIRED = "SIGNAL_EXPIRED"          # decision older than the signal validity / max age
+    PRICE_MOVED = "PRICE_MOVED"                # live price drifted: R:R or SL distance no longer valid
+    AGENT_QUORUM = "AGENT_QUORUM"              # too many LLM agents failed - no informed decision
+    DEBATE_AGAINST = "DEBATE_AGAINST"          # bear case clearly won the debate
+    NO_ROOM = "NO_ROOM"                        # opposing level too close to the entry
+    REENTRY_COOLDOWN = "REENTRY_COOLDOWN"      # same symbol stopped out recently
 
 
 class Autonomy(StrEnum):

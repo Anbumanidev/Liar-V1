@@ -147,3 +147,87 @@ def test_feature_failure_degrades_to_no_trade(pipe, monkeypatch) -> None:  # typ
     assert res.final_action == FINAL_FILTERED and "feature build failed" in (res.filtered_reason or "")
     with sf() as s:
         assert s.get(DecisionRow, res.decision_id).decision == "NO_TRADE"
+
+
+# --------------------------------------------------------------------------- two-phase cycle
+
+
+def _add_symbol(pipeline, sym: str, px: float, seed: int) -> None:  # type: ignore[no-untyped-def]
+    data = pipeline.s.data
+    data.add(sym, Timeframe.M5, make_intraday_candles(DAYS, 5, px, seed=seed, drift=0.0003))
+    data.add(sym, Timeframe.M15, make_intraday_candles(DAYS, 15, px, seed=seed, drift=0.0006))
+    data.add(sym, Timeframe.H1, make_intraday_candles(DAYS, 60, px, seed=seed, drift=0.001))
+    data.add(sym, Timeframe.M1, make_intraday_candles(DAYS[-1:], 1, px, seed=seed))
+    data.add(sym, Timeframe.D1, make_daily_candles(date(2026, 11, 23), 260, px * 0.8, seed=seed))
+
+
+def _cycle_env(pipe, monkeypatch, **settings_updates):  # type: ignore[no-untyped-def]
+    from types import SimpleNamespace
+
+    pipeline, batch_id, run_id, sf = pipe
+    _add_symbol(pipeline, "TCS", 100.0, 4)
+    _add_symbol(pipeline, "WIPRO", 100.0, 5)
+    monkeypatch.setattr("strategies.registry.run_strategies", _signal_factory())
+    scores = {"INFY": 70.0, "TCS": 90.0, "WIPRO": 80.0}
+    monkeypatch.setattr("strategies.confluence.compute_confluence",
+                        lambda features, *a, **k: ConfluenceResult(score=scores[features.symbol], grade=Grade.A))
+    llm_calls: list[str] = []
+    import agents.runner as runner
+
+    real = runner.run_sub_agents
+
+    def spy(ctx, *a, **k):  # type: ignore[no-untyped-def]
+        llm_calls.append(ctx.symbol)
+        return real(ctx, *a, **k)
+
+    monkeypatch.setattr(runner, "run_sub_agents", spy)
+    s = update_settings(pipeline.s.settings, settings_updates)
+    pipeline.update_settings(s)
+    svc = SimpleNamespace(settings=s, pipeline=pipeline, risk=pipeline.s.risk, clock=pipeline.s.clock)
+    return svc, batch_id, run_id, sf, llm_calls
+
+
+def test_cycle_sends_only_the_best_setups_to_the_llm(pipe, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from scheduler.jobs import _analyse_chunk
+
+    svc, batch_id, run_id, sf, llm_calls = _cycle_env(pipe, monkeypatch, **{"engine.max_llm_candidates_per_cycle": 1})
+    actions = _analyse_chunk(svc, Mode.INTRADAY, ["INFY", "TCS", "WIPRO"], batch_id=batch_id, run_id=run_id,
+                             check_timing=False)
+    assert llm_calls == ["TCS"]                                   # highest confluence only
+    assert actions.get(FINAL_FILTERED) == 2 and sum(actions.values()) == 3
+    with sf() as s:
+        rows = {r.symbol: r for r in s.execute(select(DecisionRow)).scalars()}
+        assert set(rows) == {"INFY", "TCS", "WIPRO"}
+        for sym in ("INFY", "WIPRO"):
+            assert rows[sym].final_action == FINAL_FILTERED
+            assert "top 1 by confluence" in rows[sym].context_json["filtered_reason"]
+        assert rows["TCS"].final_action != FINAL_FILTERED
+        # skipped setups are still shadow-tracked
+        assert {sh.symbol for sh in s.execute(select(ShadowTrade)).scalars()} >= {"INFY", "WIPRO"}
+
+
+def test_cycle_spends_no_llm_time_outside_the_entry_window(pipe, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from scheduler.jobs import _analyse_chunk
+
+    svc, batch_id, run_id, sf, llm_calls = _cycle_env(pipe, monkeypatch)
+    svc.clock.set(datetime(2026, 11, 25, 12, 30, tzinfo=IST))     # midday lull: no INTRADAY entries
+    _analyse_chunk(svc, Mode.INTRADAY, ["INFY", "TCS"], batch_id=batch_id, run_id=run_id, check_timing=True)
+    assert llm_calls == []
+    with sf() as s:
+        reasons = [r.context_json["filtered_reason"] for r in s.execute(select(DecisionRow)).scalars()]
+        assert reasons and all("outside the entry window" in r for r in reasons)
+
+
+def test_proposal_carries_execution_quality_inputs(pipe, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    pipeline, batch_id, run_id, sf = pipe
+    monkeypatch.setattr("strategies.registry.run_strategies", _signal_factory())
+    monkeypatch.setattr("strategies.confluence.compute_confluence",
+                        lambda *a, **k: ConfluenceResult(score=88.0, grade=Grade.A_PLUS, room_r=3.2))
+    res = pipeline.analyze("INFY", Mode.INTRADAY, batch_id=batch_id, run_id=run_id)
+    if res.verdict is None:
+        pytest.skip("rules meta chose NO_TRADE for this synthetic data")
+    with sf() as s:
+        prop = s.get(DecisionRow, res.decision_id).context_json["proposal"]
+    assert prop["failed_agents_pct"] == 0.0                       # rules backend: nobody failed
+    assert prop["room_r"] == 3.2 and "valid_until" in prop      # (the fake signal sets no validity)
+    assert prop["debate_bull"] is not None and prop["debate_bear"] is not None

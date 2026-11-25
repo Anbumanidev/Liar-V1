@@ -117,7 +117,9 @@ def test_versioning_seed_change_revert(session, caps: HardCaps, sim_clock) -> No
 
 
 def test_model_for_agent(settings: Settings) -> None:
-    assert settings.models.model_for("meta") == "qwen3:8b"
+    # low profile (6 GB GPU): one model for every role, so Ollama never swaps models
+    assert settings.models.model_for("meta") == "qwen3:4b"
     assert settings.models.model_for("technical") == "qwen3:4b"
+    assert settings.models.profiles["balanced"].reasoning == "qwen3:8b"
     s = update_settings(settings, {"models.assignments": {"technical": "qwen3:8b"}})
     assert s.models.model_for("technical") == "qwen3:8b"

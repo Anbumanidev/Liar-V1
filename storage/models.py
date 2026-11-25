@@ -469,6 +469,27 @@ class CapitalAccount(Base):
     updated_at: Mapped[datetime] = mapped_column(ISTDateTime)
 
 
+class FundingEvent(Base):
+    """Owner money in / out when a batch starts (the "how much to add to get back to 1000" record).
+
+    kind: INITIAL (first batch), TOP_UP (+ money added), WITHDRAW (amount < 0: profit taken out),
+    NONE (carried equity already equals the new starting capital). Paper money only.
+    """
+
+    __tablename__ = "funding_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ts: Mapped[datetime] = mapped_column(ISTDateTime, index=True)
+    batch_id: Mapped[int] = mapped_column(Integer, index=True)          # the NEW batch
+    kind: Mapped[str] = mapped_column(_str())
+    amount: Mapped[float] = mapped_column(Float)                         # signed: + in, - out
+    starting_capital: Mapped[float] = mapped_column(Float)
+    prev_batch_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    prev_equity: Mapped[float | None] = mapped_column(Float, nullable=True)  # carried in from the old batch
+    actor: Mapped[str] = mapped_column(String(64), default="system")
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class CapitalLedgerEntry(Base):
     __tablename__ = "capital_ledger"
 

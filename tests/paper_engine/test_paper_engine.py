@@ -427,3 +427,38 @@ def test_split_and_dividend(env) -> None:  # type: ignore[no-untyped-def]
     kinds = [r.entry_type for r in env.session.execute(select(CapitalLedgerEntry)).scalars()]
     assert "DIVIDEND" in kinds
     ledger_ok(env)
+
+
+def test_entry_skipped_when_fill_ruins_the_reward_risk(env) -> None:  # type: ignore[no-untyped-def]
+    """ITC 2026-11-25: planned R:R 1.52, filled 0.60 higher -> 0.59. The fill check now skips it."""
+    env.clock.set(at(DAY, 10, 0, 30))
+    prop = TradeProposal(batch_id=env.batch_id, symbol="ITC", mode=Mode.INTRADAY, direction=Direction.LONG,
+                         entry_price=310.5, entry_type=EntryType.MARKET, stop_loss=309.45, target_1=312.08,
+                         atr=0.84, created_at=env.clock.now())
+    order = env.broker.submit_entry(env.session, prop, RiskVerdict(approved=True, qty=1, max_qty=1))
+    feed(env, "ITC", DAY, "10:01", [(311.1, 311.5, 310.9, 311.3)], (10, 2))
+    assert order.status == OrderStatus.REJECTED.value
+    assert "R:R to target 1 at the fill is 0.59" in (order.reason or "")
+
+
+def test_entry_skipped_when_fill_lands_on_top_of_the_stop(env) -> None:  # type: ignore[no-untyped-def]
+    """BEL 2026-11-25: filled 0.50 (0.59 ATR) above its stop and was stopped in 3 minutes."""
+    env.clock.set(at(DAY, 10, 0, 30))
+    prop = TradeProposal(batch_id=env.batch_id, symbol="BEL", mode=Mode.INTRADAY, direction=Direction.LONG,
+                         entry_price=404.3, entry_type=EntryType.MARKET, stop_loss=401.95, target_1=409.9,
+                         atr=0.8462, created_at=env.clock.now())
+    order = env.broker.submit_entry(env.session, prop, RiskVerdict(approved=True, qty=1, max_qty=1))
+    feed(env, "BEL", DAY, "10:01", [(402.45, 402.6, 402.2, 402.4)], (10, 2))
+    assert order.status == OrderStatus.REJECTED.value and "noise would stop it out" in (order.reason or "")
+
+
+def test_manual_fill_is_not_second_guessed(env) -> None:  # type: ignore[no-untyped-def]
+    from core.enums import TradeSource
+
+    env.clock.set(at(DAY, 10, 0, 30))
+    prop = TradeProposal(batch_id=env.batch_id, symbol="ITC", mode=Mode.INTRADAY, direction=Direction.LONG,
+                         entry_price=310.5, entry_type=EntryType.MARKET, stop_loss=309.45, target_1=312.08,
+                         atr=0.84, source=TradeSource.MANUAL, created_at=env.clock.now())
+    order = env.broker.submit_entry(env.session, prop, RiskVerdict(approved=True, qty=1, max_qty=1))
+    feed(env, "ITC", DAY, "10:01", [(311.1, 311.5, 310.9, 311.3)], (10, 2))
+    assert order.status == OrderStatus.FILLED.value

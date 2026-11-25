@@ -58,7 +58,7 @@ def state(settings: Settings, **kw) -> RiskState:  # type: ignore[no-untyped-def
 def prop(**kw) -> TradeProposal:  # type: ignore[no-untyped-def]
     base = dict(batch_id=1, symbol="INFY", mode=Mode.INTRADAY, direction=Direction.LONG, entry_price=100.0,
                 stop_loss=99.0, target_1=101.5, target_2=103.0, strategy="vwap_pullback", confidence=80,
-                confluence_score=75.0, grade=Grade.A, atr=1.5, tradeable=True, sector="IT", created_at=NOW)
+                confluence_score=75.0, grade=Grade.A, atr=1.0, tradeable=True, sector="IT", created_at=NOW)
     base.update(kw)
     return TradeProposal(**base)
 
@@ -96,7 +96,7 @@ def test_intraday_long_approved_and_sized(rm: RiskManager, settings: Settings) -
 
 def test_quantity_capped_by_mode_capital_and_position_pct(rm: RiskManager, settings: Settings) -> None:
     # tiny SL distance -> risk allows 50 shares, mode capital 500 allows 5 at Rs 100
-    v = rm.evaluate(prop(stop_loss=99.9, target_1=100.2, atr=0.2), state(settings))
+    v = rm.evaluate(prop(stop_loss=99.9, target_1=100.2, atr=0.12), state(settings))
     assert v.approved, v.message
     assert v.qty == 5
 
@@ -139,7 +139,8 @@ def test_mode_disabled(rm: RiskManager, settings: Settings) -> None:
 
 @pytest.mark.parametrize("hh,mm,ok", [(9, 20, False), (9, 30, True), (14, 45, True), (14, 50, False)])
 def test_intraday_entry_window(rm: RiskManager, settings: Settings, hh: int, mm: int, ok: bool) -> None:
-    v = rm.evaluate(prop(), state(settings, now=datetime(2026, 11, 24, hh, mm, tzinfo=IST)))
+    at = datetime(2026, 11, 24, hh, mm, tzinfo=IST)
+    v = rm.evaluate(prop(created_at=at), state(settings, now=at))   # a fresh decision at that time
     assert v.approved is ok
     if not ok:
         assert v.rule == RiskRule.ENTRY_WINDOW
@@ -318,7 +319,7 @@ def test_overnight_sizing_is_gap_adjusted(rm: RiskManager, settings: Settings, c
 
 def test_cnc_small_trade_rejected_by_charges(rm: RiskManager, settings: Settings) -> None:
     # 1 share (risk Rs 5 / SL distance 4): gross Rs 10 at T1 < ~Rs 17 charges (DP Rs 15.34 dominates)
-    v = rm.evaluate(prop(mode=Mode.SWING, entry_price=400, stop_loss=396, target_1=410, target_2=430, atr=8.0),
+    v = rm.evaluate(prop(mode=Mode.SWING, entry_price=400, stop_loss=396, target_1=410, target_2=430, atr=4.0),
                     state(settings, now=datetime(2026, 11, 24, 9, 45, tzinfo=IST)))
     assert not v.approved and v.rule == RiskRule.CHARGES_EXCEED_EDGE
     assert "% of position value" in v.message or "expected net" in v.message

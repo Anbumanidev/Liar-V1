@@ -141,15 +141,70 @@ def _scan(svc: Any, mode: Mode, run_type: RunType, *, rotate: bool, check_timing
                        settings_version_id=svc.ctx.settings_version_id, is_replay=svc.ctx.is_replay)
         s.commit()
         run_id = run.id
-    actions: dict[str, int] = {}
-    for sym in chunk:
-        res = svc.pipeline.analyze(sym, mode, batch_id=batch_id, run_id=run_id, check_timing=check_timing)
-        actions[res.final_action] = actions.get(res.final_action, 0) + 1
+    actions = _analyse_chunk(svc, mode, chunk, batch_id=batch_id, run_id=run_id, check_timing=check_timing)
     with svc.session() as s:
         run = s.get(type(run), run_id)
         close_run(s, run, clock=svc.clock, n_symbols=len(chunk), summary={"actions": actions})
         s.commit()
     return {"run_id": run_id, "symbols": len(chunk), "actions": actions}
+
+
+def _analyse_chunk(svc: Any, mode: Mode, chunk: list[str], *, batch_id: int, run_id: int,
+                   check_timing: bool) -> dict[str, int]:
+    """Two phases: deterministic screen of every symbol, then the LLM for the best few only.
+
+    Phase 1 (seconds): features + strategies + confluence for the whole chunk. Phase 2: the
+    ``engine.max_llm_candidates_per_cycle`` highest-confluence setups go through the agents,
+    debate, meta and risk, strongest first, until ``engine.cycle_llm_budget_seconds`` is used
+    (LLM backends only). Every other setup is recorded as FILTERED with the reason and shadow-
+    tracked, so nothing disappears from the audit trail.
+    """
+    import time as _time
+
+    eng = svc.settings.engine
+    actions: dict[str, int] = {}
+
+    def _count(res: Any) -> None:
+        actions[res.final_action] = actions.get(res.final_action, 0) + 1
+
+    pipeline = svc.pipeline
+    if not hasattr(pipeline, "screen"):   # test doubles with only analyze()
+        for sym in chunk:
+            _count(pipeline.analyze(sym, mode, batch_id=batch_id, run_id=run_id, check_timing=check_timing))
+        return actions
+    pending = []
+    for sym in chunk:
+        h = pipeline.screen(sym, mode, batch_id=batch_id, run_id=run_id, check_timing=check_timing)
+        if h.pending:
+            pending.append(h)
+        else:
+            _count(h.result)
+    pending.sort(key=lambda h: -h.confluence)
+    top_k = max(1, int(eng.max_llm_candidates_per_cycle))
+    budgeted = eng.llm_backend != "rules"
+    window_ok, window_why = True, ""
+    if check_timing and getattr(svc, "risk", None) is not None and hasattr(svc.risk, "in_entry_window"):
+        window_ok, window_why = svc.risk.in_entry_window(mode, _now(svc))
+    t0 = _time.monotonic()
+    sent = 0
+    for i, h in enumerate(pending):
+        reason = None
+        if not window_ok:
+            reason = f"outside the entry window ({window_why}); no LLM time spent"
+        elif i >= top_k:
+            reason = (f"setup passed the filter (confluence {h.confluence:.1f}) but was not in this cycle's "
+                      f"top {top_k} by confluence")
+        elif budgeted and i > 0 and _time.monotonic() - t0 > eng.cycle_llm_budget_seconds:
+            reason = (f"cycle LLM time budget ({eng.cycle_llm_budget_seconds}s) used up before this setup "
+                      f"(confluence {h.confluence:.1f})")
+        sent += reason is None
+        _count(pipeline.resume(h, skip_reason=reason))
+    if pending:
+        log_event("scans", {"event": "cycle_llm", "mode": mode.value, "run_id": run_id,
+                            "screened": len(chunk), "passed_filter": len(pending), "sent_to_llm": sent,
+                            "candidates": [{"symbol": h.symbol, "confluence": round(h.confluence, 2)} for h in pending],
+                            "llm_seconds": round(_time.monotonic() - t0, 1)}, clock=svc.clock)
+    return actions
 
 
 # =========================================================================== jobs

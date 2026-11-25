@@ -187,7 +187,8 @@ def _candle_points(features: StockFeatures, timeframes: list[str], s: int) -> fl
 def _room_points(
     features: StockFeatures, signal: StrategySignal | None, direction: Direction, min_rr: float,
     timeframes: list[str], notes: list[str],
-) -> float:
+) -> tuple[float, float | None]:
+    """(points, room in R to the nearest opposing level; None = no level found)."""
     entry = signal.entry_price if signal is not None else features.ltp
     risk = abs(signal.entry_price - signal.stop_loss) if signal is not None else (features.atr or 0.0)
     if risk <= 0:
@@ -196,10 +197,10 @@ def _room_points(
     if lv is None:
         has_any = bool(collect_levels(features, timeframes))
         notes.append("room: no opposing level" + (" (clear path)" if has_any else " (no level data)"))
-        return 8.0
+        return 8.0, None
     room_r = abs(lv - entry) / risk
     notes.append(f"room: nearest opposing level {lv:.2f} = {room_r:.2f}R")
-    return COMPONENT_MAX["room"] * (_lin(room_r, 0.5, min_rr + 0.5) or 0.0)
+    return COMPONENT_MAX["room"] * (_lin(room_r, 0.5, min_rr + 0.5) or 0.0), round(room_r, 4)
 
 
 def _score_direction(
@@ -216,13 +217,16 @@ def _score_direction(
     s = sign(direction)
     notes: list[str] = [f"direction {direction.value}"]
     tfs = [str(t.value if hasattr(t, "value") else t) for t in mode_cfg.timeframes]
+    trend_pts = _trend_points(features, tfs, s, notes)
+    volume_pts = _volume_points(features, mode, notes)
+    room_pts, room_r = _room_points(features, signal, direction, mode_cfg.min_rr, tfs, notes)
     comp: dict[str, float] = {
-        "trend": _trend_points(features, tfs, s, notes),
-        "volume": _volume_points(features, mode, notes),
+        "trend": trend_pts,
+        "volume": volume_pts,
         "regime": _regime_points(features, signal, s),
         "market": _market_points(features, market, s),
         "candles": _candle_points(features, tfs, s),
-        "room": _room_points(features, signal, direction, mode_cfg.min_rr, tfs, notes),
+        "room": room_pts,
         "sentiment": 2.5 if sentiment is None else COMPONENT_MAX["sentiment"] * _clip01((sentiment * s + 1) / 2),
     }
     if mode in FUNDAMENTAL_MODES:
@@ -243,7 +247,7 @@ def _score_direction(
     score = round(max(0.0, min(100.0, score)), 2)
     comp = {k: round(v, 3) for k, v in comp.items()}
     notes.append(f"raw {raw:.2f} / {max_total:g} max points")
-    return ConfluenceResult(score=score, grade=grade_for(score), components=comp, notes=notes)
+    return ConfluenceResult(score=score, grade=grade_for(score), components=comp, notes=notes, room_r=room_r)
 
 
 def compute_confluence(

@@ -30,10 +30,15 @@ def _new_batch(ctx: Any, current: Any, settings: Any) -> None:
         versions = svc.settings_history(session, limit=50)
     version_labels = {v.id: f"v{v.id} - {ui.fmt_dt(v.created_at)} - {v.author}: {(v.note or '')[:40]}"
                       for v in versions}
+    default_cap = float(settings.capital.starting_capital if settings else 1000.0)
+    with ctx.session() as session:
+        from capital.funding import topup_preview
+
+        preview = topup_preview(session, float(st.session_state.get("nb_cap", default_cap)))
+    (st.info if preview["action"] != "WITHDRAW" else st.success)(preview["message"])
     with st.form("new_batch_form"):
-        name = st.text_input("Name", key="nb_name", max_chars=120)
-        capital = st.number_input("Starting capital (Rs)", min_value=100.0, value=float(settings.capital.starting_capital
-                                                                                          if settings else 1000.0),
+        name = st.text_input("Name (blank = next 'Batch N')", key="nb_name", max_chars=120)
+        capital = st.number_input("Starting capital (Rs)", min_value=100.0, value=default_cap,
                                   step=100.0, key="nb_cap")
         source = st.radio("Settings", ["Copy current settings", "Copy a previous version"], key="nb_src")
         version_id = st.selectbox("Previous settings version", list(version_labels),
@@ -45,13 +50,11 @@ def _new_batch(ctx: Any, current: Any, settings: Any) -> None:
         typed = st.text_input("Type CONFIRM" + (f" or the current batch name '{expected}'" if expected else ""),
                               key="nb_confirm")
         if st.form_submit_button("Start new batch", type="primary"):
-            if not name.strip():
-                st.error("Name is required.")
-            elif not svc.confirmation_ok(typed, batch_name=expected):
+            if not svc.confirmation_ok(typed, batch_name=expected):
                 st.error("Confirmation text does not match.")
             else:
                 payload = {
-                    "name": name.strip(), "starting_capital": float(capital),
+                    "name": name.strip() or None, "starting_capital": float(capital),
                     "copy_settings_from_version_id": (int(version_id) if source.startswith("Copy a previous")
                                                       and version_id is not None else None),
                     "open_cnc_handling": cnc, "confirm_text": typed.strip(),

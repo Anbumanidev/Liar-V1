@@ -304,6 +304,10 @@ class PaperBroker:
             self.cancel_order(session, order, f"fill {price} is through the stop-loss {sl}; entry skipped",
                               status=OrderStatus.REJECTED)
             return None
+        problem = self._fill_quality_problem(prop, direction, price)
+        if problem is not None:
+            self.cancel_order(session, order, f"fill {price}: {problem}; entry skipped", status=OrderStatus.REJECTED)
+            return None
         leverage = float(meta.get("leverage", 1.0))
         product = Product(order.product)
         margin = round(order.qty * price / leverage, 4)
@@ -349,6 +353,26 @@ class PaperBroker:
                              "margin": margin, "entry_charges": entry_ch.total}, clock=self.clock)
         self._notify("entry", pos, order)
         return pos
+
+    def _fill_quality_problem(self, prop: TradeProposal, direction: Direction, price: float) -> str | None:
+        """Last check at the ACTUAL fill price (system trades): the plan must still make sense.
+
+        On 2026-11-25 ITC filled 0.60 above plan: R:R to T1 fell from 1.52 to 0.59, and BEL filled
+        so close to its stop (0.59 ATR) that noise stopped it out in 3 minutes.
+        """
+        if prop.source != TradeSource.SYSTEM:
+            return None
+        r = self.settings.risk
+        sl, t1 = prop.stop_loss, prop.target_1
+        risk = abs(price - sl)
+        reward = (t1 - price) if direction == Direction.LONG else (price - t1)
+        rr = reward / risk if risk > 0 else 0.0
+        if r.fill_rr_min > 0 and rr + 1e-9 < r.fill_rr_min:
+            return f"R:R to target 1 at the fill is {rr:.2f} (< {r.fill_rr_min:g}) - price ran away from the plan"
+        if prop.atr and prop.atr > 0 and risk + 1e-9 < r.sl_min_atr * prop.atr:
+            return (f"stop-loss only {risk:.2f} = {risk / prop.atr:.2f} ATR from the fill "
+                    f"(min {r.sl_min_atr:g} ATR) - noise would stop it out")
+        return None
 
     # ================================================================== exits
 

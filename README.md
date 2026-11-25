@@ -53,15 +53,22 @@ copy .env.example .env       # then edit .env (see below)
 .\.venv\Scripts\python.exe scripts\health_check.py
 ```
 
-No `make` on Windows? `tasks.ps1` has the same targets: `setup, pull-models, run, dashboard, test,
+No `make` on Windows? `tasks.ps1` has the same targets: `setup, pull-models, run, web, dashboard, test,
 replay, walk-forward, backup, health`.
 
 ### 2.1 Local LLMs (Ollama)
 1. Install Ollama from <https://ollama.com/download> and keep it running.
 2. `python scripts/pull_models.py --profile low` pulls the default profile:
-   * `low` (default; fits a 6 GB GPU such as an RTX 4050): `qwen3:4b` for the 10 specialist
-     agents and `qwen3:8b` for Bull, Bear and Meta.
+   * `low` (default; 6 GB GPU such as an RTX 4050): **`qwen3:4b` for every role**. One model
+     stays loaded on the GPU, so Ollama never swaps models. (With `qwen3:8b` + `qwen3:4b` on 6 GB,
+     76 % of agent calls timed out on 2026-11-25 and a cycle took 3–25 minutes; with one 4B model a
+     full analysis takes ~45 s.)
+   * `balanced` (≥ 10 GB VRAM): `qwen3:4b` agents, `qwen3:8b` for Bull, Bear and Meta.
    * `high` (≥ 12 GB VRAM): `qwen3:8b` / `qwen3:14b`.
+   * At most 2 LLM calls run at once (`models.max_concurrent_requests`), a timed-out call is
+     retried once, and FinBERT runs on the CPU so the model gets the whole GPU.
+   * Ollama cloud models (names ending in `:cloud`) run on ollama.com servers, not your PC — don't
+     assign them to agents: your data would leave the machine.
 3. On the dashboard (Control → Agents & models) you can assign any installed model to any agent.
    Each agent call's latency is logged, and a warning is logged if one stock's full cycle takes
    more than 60 s.
@@ -103,7 +110,8 @@ git-ignored.
 
 ```powershell
 .\tasks.ps1 run          # engine (scheduler + control loop):  python main.py engine
-.\tasks.ps1 dashboard    # dashboard on http://127.0.0.1:8501 (separate process)
+.\tasks.ps1 web          # live web dashboard on http://127.0.0.1:8600  (main dashboard)
+.\tasks.ps1 dashboard    # advanced settings console on http://127.0.0.1:8501 (Streamlit, optional)
 ```
 
 The engine and dashboard are **separate processes**. The dashboard only writes `control_commands`
@@ -118,7 +126,26 @@ python main.py analyze RELIANCE --mode SWING             # full agent pipeline n
 python main.py replay --start 2026-10-01 --end 2026-10-31 --modes INTRADAY,SWING --symbols INFY,TCS
 python main.py walk-forward --start 2026-06-01 --end 2026-10-31 --modes SWING --train-days 20 --test-days 5
 python scripts/backup_db.py --keep 30
+python main.py new-batch --capital 1000      # new batch; prints the top-up needed to start with ₹1,000
+python main.py postmortem --date 2026-11-25  # every trade of a day: story, why it lost, what now prevents it
+python main.py diagnose --date 2026-11-25    # what failed in the logs and what to do next
+python main.py upgrade-settings              # apply recommended settings as one audited version
 ```
+
+**After every trading day:** run `python main.py postmortem` and `python main.py diagnose` (or open
+Today and Health on the web dashboard). They read the database, candles and logs and tell you what
+happened in plain language.
+
+### Batches and funding (start every batch from ₹1,000)
+* A batch is one experiment with its own capital. `new-batch` (or Batches → Start new batch on the
+  web dashboard) closes the current batch and starts a new one with the capital you choose
+  (default `capital.starting_capital` = ₹1,000).
+* The old batch's equity is carried over and the difference is recorded:
+  **top-up = new capital − old equity** (positive = money you add, negative = profit withdrawn).
+* Overall figures across all batches: **net invested** (= all top-ups − withdrawals), **current
+  capital**, and **overall P&L** (= sum of every batch's P&L). Example from 2026-11-25: Batch 1
+  ended at ₹995.28 (−₹4.72), so Batch 2 needed a ₹4.72 top-up. Net invested ₹1,004.72, current
+  capital ₹1,000.00, overall P&L −₹4.72.
 
 ### Daily schedule (IST, NSE trading days only; holidays from NSE's own list)
 | Time | Job |
@@ -216,12 +243,32 @@ max 1 position per sector.
 **Rejections:**
 * near a circuit limit;
 * R:R below 1.5 (intraday) or 2 (other modes);
-* SL distance below 0.3 × ATR or above 3 × ATR;
+* SL distance below 0.8 × ATR (was 0.3) or above 3 × ATR;
 * TRADEABLE = false;
 * low confluence or confidence;
 * events (results, ex-dates) inside the holding window;
 * correlation above 0.7 with an open position;
 * averaging down.
+
+**Execution-quality gates** (added after the 2026-11-25 post-mortem, where all three INTRADAY
+trades lost: they were 9–26 minutes stale, chased, and two were taken with 9/9 agents failed).
+Each is a deterministic rule with its own code, applies to system trades, and can be tuned in
+`config/risk.yaml` / `modes.yaml`:
+
+| Rule | Refuses when | Default |
+|---|---|---|
+| `SIGNAL_EXPIRED` | the decision is older than the mode's max age, or past the strategy signal's validity | INTRADAY 6 min |
+| `PRICE_MOVED` | at the **live** price: R:R < 0.8 × min R:R, stop < 0.8 ATR away, price moved > 1 ATR from the plan, or already through the stop | on |
+| `AGENT_QUORUM` | more than 34 % of the LLM agents failed | 34 % |
+| `DEBATE_AGAINST` | bear conviction − bull conviction ≥ 10 | on |
+| `NO_ROOM` | the nearest resistance/support is less than 1R from the entry | 1R |
+| `REENTRY_COOLDOWN` | the same symbol hit its stop recently | INTRADAY 60 min |
+| fill check | at the actual paper fill: R:R to T1 < 1.0, or the stop is < 0.8 ATR away → entry skipped | on |
+
+INTRADAY entries also skip the midday lull: windows are 09:30–11:45 and 13:15–14:45. Each
+cycle screens every symbol deterministically first, then sends only the best 2 setups (by
+confluence) to the LLM agents within a 240 s budget, and a cycle never starts while the previous
+one is still running.
 
 **Charges check:** a trade is rejected (`CHARGES_EXCEED_EDGE`) if expected profit at T1 minus
 round-trip charges is ≤ 0, or if charges exceed 1 % of the position value.
@@ -283,7 +330,41 @@ round-trip charges is ≤ 0, or if charges exceed 1 % of the position value.
   against what the price did next, on both traded and shadow setups. It suggests agent weights that
   you apply with one click; nothing changes automatically. Validate them with a walk-forward replay.
 
-## 5. The dashboard
+## 5. The dashboards
+
+### 5.1 Live web dashboard (main) — `python main.py web` → http://127.0.0.1:8600
+A fast HTML/CSS/JavaScript app (no build step, no CDN: the candlestick library, TradingView
+Lightweight Charts 4.2.3 under Apache-2.0, is vendored in `webui/static/vendor/`). It updates live
+over one Server-Sent Events stream. Same login file as before (`scripts/set_password.py`), with a
+30-minute idle timeout and lockout after failed logins. It binds to 127.0.0.1 only.
+* **Home:** total capital, overall P&L and net invested (all batches), today's P&L, this batch's
+  P&L, win rate, drawdown/tier; open positions with live price and a stop → entry → target bar;
+  approvals with Approve/Reject; a live activity feed; the autonomy switch; Pause, Resume and Kill
+  switch (typed CONFIRM).
+* **Live:** every analysis as it happens (strategy, confluence/grade, final action and the reason;
+  click one for signals, confluence bars, agent votes, debate, meta reasons and every risk check).
+  A big candle chart with **10m / 20m / 30m** (intraday) and **1H / 5H / 1D** (long-term), plus
+  5m/15m, volume, EMA 9/21, VWAP, trade markers and entry/SL/T1/T2 lines; open positions and a
+  watch list with live prices.
+* **Today:** day summary, the **trade completed log** (one row per trade: name, mode, strategy,
+  entry time/price, exit time/price, stop-loss, targets, exit reason, qty, gross, charges, net, R,
+  duration, result), the decision funnel, and "What went wrong today" from the post-mortem.
+* **Trade detail:** chart around the trade with entry/exit markers and SL/target lines, the
+  facts, a "what happened" timeline, diagnosis cards (cause → fix → "fixed in system"), agent
+  votes and the debate.
+* **Trades:** journal across batches with filters, totals and CSV export.
+* **Batches:** overall money (net invested, withdrawn, current capital, overall P&L), the batch
+  table (start capital, top-up, equity, P&L, trades, win rate), equity curves, and **Start new
+  batch** with a capital box (default ₹1,000) and a live "add ₹X / withdraw ₹Y" preview.
+* **Health & logs:** findings from `diagnose` with the action to take, LLM failure/latency
+  stats, data errors by symbol, top errors, and a live log tail with filters.
+
+All writes go through the engine's command queue (the risk manager still vetoes everything), and
+every POST needs the CSRF token plus a same-origin check.
+
+### 5.2 Advanced console (Streamlit, optional) — `.\tasks.ps1 dashboard` → http://127.0.0.1:8501
+Everything else: per-mode settings, strategies, agents & models, prompts, schedule,
+notifications, settings history with revert.
 The navigation is grouped as **Home · Trading · Analytics · Settings · System**. Home is a
 one-screen cockpit:
 * alerts (HALT, engine down, data feed);
@@ -344,7 +425,9 @@ The dashboard binds to **127.0.0.1** only. **Never expose plain HTTP to the inte
 * **Logs:** raw JSONL in `logs/YYYY-MM-DD/<category>.jsonl` (agents, debates, decisions, risk,
   orders, trades, capital, approvals, control, settings, errors, …), plus loguru logs per process.
 * **Replay:** each replay uses its own DB in `runtime/replay/<name>.db` and writes a JSON report
-  next to it, so your live paper account is never touched.
+  next to it, so your live paper account is never touched. Replay logs go to `logs/replay/`
+  (they used to land in the live day folders, under simulated dates). Tests log to a temp folder.
+* **Funding:** `funding_events` records every batch's starting deposit / top-up / withdrawal.
 
 ## 7. Project structure
 ```

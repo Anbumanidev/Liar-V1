@@ -152,8 +152,41 @@ class _RetryingClient:
 
     backend: str = "base"
 
-    def __init__(self, max_retries: int = 2) -> None:
+    def __init__(self, max_retries: int = 2, *, timeout_retries: int | None = None,
+                 max_concurrent: int | None = None) -> None:
+        """
+        Args:
+            max_retries: re-prompts after an INVALID answer (schema / JSON errors).
+            timeout_retries: retries after a transport error (timeout, connection). None = same
+                as ``max_retries``. Kept low on purpose: a timed-out local model is overloaded,
+                and retrying 3x only multiplies the queue (2026-11-25: 360 s per failed agent).
+            max_concurrent: process-wide cap on in-flight calls (None = unlimited). Calls wait
+                for a slot BEFORE the request starts, so the HTTP timeout measures generation
+                time, not time spent queueing behind other agents inside the model server.
+        """
         self.max_retries = max(0, int(max_retries))
+        self.timeout_retries = self.max_retries if timeout_retries is None else max(0, int(timeout_retries))
+        # Overall attempt cap: legacy behaviour (max_retries + 1 for any mix of errors) unless a
+        # separate transport-retry budget was given.
+        self.max_attempts = (self.max_retries + 1 if timeout_retries is None
+                             else self.max_retries + self.timeout_retries + 1)
+        self.max_concurrent = int(max_concurrent) if max_concurrent else None
+        self._slots = threading.BoundedSemaphore(self.max_concurrent) if self.max_concurrent else None
+
+    def _call(
+        self,
+        agent: str,
+        model: str,
+        messages: list[dict[str, str]],
+        schema: type[BaseModel],
+        temperature: float,
+        think: bool,
+    ) -> tuple[str, int | None, int | None]:
+        """``_chat`` inside a concurrency slot (if capped)."""
+        if self._slots is None:
+            return self._chat(agent, model, messages, schema, temperature, think)
+        with self._slots:
+            return self._chat(agent, model, messages, schema, temperature, think)
 
     # Subclasses return (content, tokens_in, tokens_out) or raise.
     def _chat(
@@ -189,16 +222,21 @@ class _RetryingClient:
         raw: str | None = None
         errors: list[str] = []
         attempts = 0
-        total = self.max_retries + 1
+        transport_failures = 0
+        invalid_answers = 0
         try:
-            for attempt in range(1, total + 1):
-                attempts = attempt
+            while True:
+                attempts += 1
+                attempt = attempts
                 try:
-                    content, t_in, t_out = self._chat(agent, model, messages, schema, temperature, think)
+                    content, t_in, t_out = self._call(agent, model, messages, schema, temperature, think)
                 except Exception as exc:  # noqa: BLE001 - any transport error is retried then reported
                     msg = f"attempt {attempt}: {type(exc).__name__}: {exc}"
                     errors.append(msg)
                     logger.warning(f"LLM call failed agent={agent} model={model} {msg}")
+                    transport_failures += 1
+                    if transport_failures > self.timeout_retries or attempts >= self.max_attempts:
+                        break
                     continue
                 tokens_in, tokens_out = _add(tokens_in, t_in), _add(tokens_out, t_out)
                 raw = content
@@ -208,6 +246,9 @@ class _RetryingClient:
                     msg = f"attempt {attempt}: invalid output: {exc}"
                     errors.append(msg)
                     logger.warning(f"LLM output invalid agent={agent} model={model} {msg[:300]}")
+                    invalid_answers += 1
+                    if invalid_answers > self.max_retries or attempts >= self.max_attempts:
+                        break
                     echo = content if len(content) <= _MAX_ECHO_CHARS else content[:_MAX_ECHO_CHARS]
                     messages.append({"role": "assistant", "content": echo})
                     messages.append({"role": "user", "content": corrective_message(str(exc))})
@@ -253,8 +294,11 @@ class OllamaClient(_RetryingClient):
         keep_alive: str | float | None = "15m",
         num_ctx: int = 8192,
         client: Any = None,
+        *,
+        timeout_retries: int | None = None,
+        max_concurrent: int | None = None,
     ) -> None:
-        super().__init__(max_retries=max_retries)
+        super().__init__(max_retries=max_retries, timeout_retries=timeout_retries, max_concurrent=max_concurrent)
         self.host = host
         self.timeout = timeout
         self.keep_alive = keep_alive
@@ -455,11 +499,14 @@ def build_llm(settings: "Settings") -> LLMClient:
         logger.info("LLM backend: rules (deterministic interpretation, no model calls)")
         return RulesClient()
     m = settings.models
-    logger.info(f"LLM backend: ollama at {m.ollama_host} (profile {m.active_profile})")
+    logger.info(f"LLM backend: ollama at {m.ollama_host} (profile {m.active_profile}, "
+                f"max {m.max_concurrent_requests} concurrent request(s))")
     return OllamaClient(
         host=m.ollama_host,
         timeout=float(m.request_timeout_seconds),
         max_retries=m.max_retries,
         keep_alive=m.keep_alive,
         num_ctx=m.num_ctx,
+        timeout_retries=m.timeout_retries,
+        max_concurrent=m.max_concurrent_requests,
     )

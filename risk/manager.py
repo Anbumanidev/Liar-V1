@@ -31,6 +31,7 @@ from core.enums import (
     BatchStatus,
     Direction,
     DrawdownTier,
+    EntryType,
     EventType,
     Grade,
     Mode,
@@ -166,6 +167,10 @@ class RiskManager:
                 hi = mid
         return lo
 
+    def in_entry_window(self, mode: Mode, now: datetime) -> tuple[bool, str]:
+        """Public: is ``now`` inside the mode's entry windows? (the cycle skips the LLM otherwise)."""
+        return self._in_entry_window(mode, now)
+
     def _in_entry_window(self, mode: Mode, now: datetime) -> tuple[bool, str]:
         t = to_ist(now).time()
         mcfg = self.settings.mode(mode)
@@ -278,6 +283,8 @@ class RiskManager:
                 c.add(RiskRule.CONFLUENCE_BELOW_MIN, False, "confluence score missing")
             c.add(RiskRule.GRADE_NOT_ALLOWED, grade_at_least(p.grade, mcfg.min_grade),
                   f"grade {p.grade.value if p.grade else None} below mode minimum {mcfg.min_grade.value}")
+        if system:
+            self._execution_quality(c, p, state, mode, check_timing=check_timing)
         if tier != DrawdownTier.NORMAL and not tc.halted:
             ok = p.grade is not None and tc.grade_allowed(p.grade)
             allowed = "/".join(g.value for g in tc.allowed_grades)
@@ -433,6 +440,81 @@ class RiskManager:
             expected_net_at_t1=net_t1,
         )
         return self._finish(c, p, qty=qty, max_qty=max_qty, **verdict_kw)
+
+    def _execution_quality(self, c: _Checks, p: TradeProposal, state: RiskState, mode: Mode, *,
+                           check_timing: bool) -> None:
+        """Gates added after the 2026-11-25 post-mortem (three losing INTRADAY trades).
+
+        Each rule is skipped when its input is unknown (None), so manual trades and older
+        proposals are unaffected. All of them are pure comparisons of code-computed numbers.
+        """
+        r = self.settings.risk
+        mcfg = self.settings.mode(mode)
+        long_ = Direction(p.direction) == Direction.LONG
+        now = to_ist(state.now)
+
+        # Too many LLM agents failed: the vote / debate / meta saw almost nothing (BEL: 9/9 failed).
+        if p.failed_agents_pct is not None:
+            c.add(RiskRule.AGENT_QUORUM, p.failed_agents_pct <= r.max_failed_agents_pct + _EPS,
+                  f"{p.failed_agents_pct:.0f}% of the LLM agents failed (max {r.max_failed_agents_pct:g}%): "
+                  "the decision is not informed")
+        # The case AGAINST clearly won the debate (BEL: bear 95 vs bull 70, meta still said BUY).
+        if r.debate_veto_enabled and p.debate_bull is not None and p.debate_bear is not None:
+            deficit = p.debate_bear - p.debate_bull
+            c.add(RiskRule.DEBATE_AGAINST, deficit < max(1, r.max_debate_deficit),
+                  f"debate lost: bear conviction {p.debate_bear} vs bull {p.debate_bull} "
+                  f"(deficit {deficit} >= {max(1, r.max_debate_deficit)})")
+        # An opposing level sits right in front of the entry (BEL: 0.04R and 0.13R of room).
+        if r.min_room_r > 0 and p.room_r is not None:
+            c.add(RiskRule.NO_ROOM, p.room_r + _EPS >= r.min_room_r,
+                  f"nearest opposing level only {p.room_r:.2f}R away (min {r.min_room_r:g}R): target unlikely")
+        # Same symbol stopped out recently (BEL re-entered 13 minutes after its stop).
+        cool = mcfg.reentry_cooldown_minutes
+        last = state.last_sl_exit.get(f"{p.symbol}:{mode.value}")
+        if cool and last is not None:
+            mins = (now - to_ist(last)).total_seconds() / 60.0
+            c.add(RiskRule.REENTRY_COOLDOWN, mins >= cool,
+                  f"{p.symbol} stopped out {mins:.0f} min ago (cooldown {cool} min)")
+        if not check_timing:
+            return
+        # Stale decision: signal validity / maximum age (BEL entered 6 min after its signal expired).
+        if p.valid_until is not None:
+            vu = to_ist(p.valid_until)
+            c.add(RiskRule.SIGNAL_EXPIRED, now <= vu, f"signal was valid until {vu:%H:%M}, now {now:%H:%M}")
+        if mcfg.max_signal_age_minutes:
+            age = (now - to_ist(p.created_at)).total_seconds() / 60.0
+            c.add(RiskRule.SIGNAL_EXPIRED, age <= mcfg.max_signal_age_minutes + _EPS,
+                  f"decision is {age:.1f} min old (max {mcfg.max_signal_age_minutes} min for {mode.value})")
+        # Re-price the plan at the LIVE price (ITC: R:R 1.52 on paper, 0.59 at the actual entry).
+        live = float(p.ltp) if p.ltp else None
+        if live is None or live <= 0:
+            return
+        sl, t1, entry = p.stop_loss, p.target_1, p.entry_price
+        if (live <= sl) if long_ else (live >= sl):
+            c.add(RiskRule.PRICE_MOVED, False, f"live price {live:.2f} is already through the stop-loss {sl:.2f}")
+            return
+        if p.entry_type != EntryType.MARKET:
+            # A LIMIT entry fills at its own price; only refuse when the target is already reached.
+            reached = (live >= t1) if long_ else (live <= t1)
+            c.add(RiskRule.PRICE_MOVED, not reached, f"live price {live:.2f} already at/through target 1 {t1:.2f}")
+            return
+        risk_live = abs(live - sl)
+        reward_live = (t1 - live) if long_ else (live - t1)
+        rr_live = reward_live / risk_live if risk_live > 0 else 0.0
+        need_rr = mcfg.min_rr * r.live_rr_tolerance
+        problems: list[str] = []
+        if rr_live + _EPS < need_rr:
+            problems.append(f"R:R at live price {live:.2f} is {rr_live:.2f} (< {need_rr:.2f})")
+        atr = p.atr if p.atr else state.atr
+        if atr and atr > 0:
+            if risk_live + _EPS < r.sl_min_atr * atr:
+                problems.append(f"stop only {risk_live:.2f} = {risk_live / atr:.2f} ATR from the live price "
+                                f"(min {r.sl_min_atr:g} ATR)")
+            drift = abs(live - entry)
+            if r.max_entry_drift_atr > 0 and drift > r.max_entry_drift_atr * atr + _EPS:
+                problems.append(f"price moved {drift:.2f} = {drift / atr:.2f} ATR from the planned entry {entry:.2f} "
+                                f"(max {r.max_entry_drift_atr:g} ATR)")
+        c.add(RiskRule.PRICE_MOVED, not problems, "; ".join(problems) or f"live price {live:.2f} ok")
 
     def _finish(self, c: _Checks, p: TradeProposal, *, qty: int, max_qty: int, **kw: Any) -> RiskVerdict:
         if c.failed:

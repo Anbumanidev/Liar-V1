@@ -122,7 +122,7 @@ def test_llm_choices_are_mapped_to_code_prices(case: Case, settings: Settings) -
     # quantity is never part of the decision (the risk manager sizes trades)
     assert not any("qty" in f or "quant" in f for f in list(MetaDecision.model_fields) + list(MetaOutput.model_fields))
     call = fake.calls_for("meta")[0]
-    assert call["think"] == settings.models.reasoning_think and call["model"] == "qwen3:8b"
+    assert call["think"] == settings.models.reasoning_think and call["model"] == settings.models.profiles["low"].reasoning
     assert "OPTIONS (choose by index only)" in call["user"] and '"suggested_choice"' in call["user"]
 
 
@@ -149,7 +149,7 @@ def test_llm_no_trade_keeps_reason_and_shadow_prices(case: Case) -> None:
                                    "strategy_index": "null"}})
     d = case.meta(fake)
     assert d.decision == TradeDecision.NO_TRADE and d.status == AgentStatus.OK and d.why_not == "bear case stronger"
-    assert d.confidence == 35 and d.model == "qwen3:8b"
+    assert d.confidence == 35 and d.model == case.settings.models.profiles["low"].reasoning
     assert (d.strategy, d.stop_loss, d.target_1) == ("opening_range_breakout", 98.8, 102.0)  # for shadow tracking
 
 
@@ -166,7 +166,7 @@ def test_invented_price_index_rejected(case: Case) -> None:
     d = case.meta(fake)
     _failed(d)
     assert len(fake.calls) == 3 and "target_1_index 57 does not exist" in (d.error or "")
-    assert d.model == "qwen3:8b" and d.prompt_version == 1
+    assert d.model == case.settings.models.profiles["low"].reasoning and d.prompt_version == 1
 
 
 def test_bad_rr_rejected(case: Case) -> None:
