@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from loguru import logger
 
+from agents.prompt_store import PromptRenderError
 from agents.schemas import (
     MAX_FINDING_CHARS,
     MAX_FINDINGS,
@@ -336,6 +337,7 @@ class SubAgent(ABC):
         t0 = time.perf_counter()
         det: AgentReport | None = None
         payload: dict[str, Any] = {}
+        meta: dict[str, Any] = {}  # model / prompt version / tokens once known
 
         def _ms() -> int:
             return int((time.perf_counter() - t0) * 1000)
@@ -361,6 +363,7 @@ class SubAgent(ABC):
             model = settings.models.model_for(self.name)
             pinned = settings.agents.prompt_versions.get(self.name)
             tpl = prompts.get(self.name, pinned)
+            meta = {"model": model, "prompt_version": tpl.version}
             system, user = prompts.render_prompt(tpl, **self.prompt_vars(ctx, payload, settings))
             res = llm.generate(
                 self.name, model, system, user, self.OutputModel,
@@ -383,14 +386,18 @@ class SubAgent(ABC):
             extra["attempts"] = res.attempts
             return rep.model_copy(update={**meta, "extra": extra, "status": AgentStatus.OK, "latency_ms": _ms()})
         except Exception as exc:  # noqa: BLE001 - one agent failing must never crash the loop
-            logger.exception(f"Agent {self.name} failed for {ctx.symbol}/{ctx.mode.value}: {exc}")
+            if isinstance(exc, PromptRenderError):
+                # A broken (dashboard-edited) prompt is a configuration error: no traceback spam.
+                logger.error(f"Agent {self.name} FAILED for {ctx.symbol}/{ctx.mode.value}: {exc}")
+            else:
+                logger.exception(f"Agent {self.name} failed for {ctx.symbol}/{ctx.mode.value}: {exc}")
             try:
                 rep = self.failed_report(ctx, f"{type(exc).__name__}: {exc}", det)
             except Exception as inner:  # noqa: BLE001 - last-resort minimal report
                 logger.error(f"Agent {self.name} could not build a FAILED report: {inner}")
                 rep = AgentReport(agent=self.name or "unknown", symbol=ctx.symbol, mode=ctx.mode,
                                   timestamp=ctx.as_of, status=AgentStatus.FAILED, error=str(exc)[:1000])
-            return rep.model_copy(update={"data_used": payload, "latency_ms": _ms()})
+            return rep.model_copy(update={**meta, "data_used": payload, "latency_ms": _ms()})
 
     def _rules(self, det: AgentReport, payload: dict[str, Any], latency_ms: int) -> AgentReport:
         """Report for the 'rules' backend: the deterministic interpretation, status OK."""

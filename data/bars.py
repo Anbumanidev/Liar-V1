@@ -61,17 +61,33 @@ def _to_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
     return df.set_index(pd.DatetimeIndex(pd.to_datetime(df.index)))
 
 
-def _is_daily_like(idx: pd.DatetimeIndex) -> bool:
-    """All timestamps at local midnight (typical daily/weekly vendor output)."""
-    if len(idx) == 0:
-        return False
+def _all_midnight(idx: pd.DatetimeIndex) -> bool:
     return bool(((idx.hour == 0) & (idx.minute == 0) & (idx.second == 0)).all())
 
 
+def _is_daily_like(idx: pd.DatetimeIndex) -> bool:
+    """All timestamps at midnight - in their own timezone or in IST (daily/weekly vendor output)."""
+    if len(idx) == 0:
+        return False
+    return _all_midnight(idx) or (idx.tz is not None and _all_midnight(idx.tz_convert(IST)))
+
+
 def _align_to_session_open(idx: pd.DatetimeIndex) -> pd.DatetimeIndex:
-    """Map each timestamp to 09:15 IST of its date *in its own timezone* (daily/weekly bars)."""
-    local_dates = idx.tz_localize(None).normalize() if idx.tz is not None else idx.normalize()
-    return pd.DatetimeIndex(local_dates + _SESSION_START).tz_localize(IST)
+    """Map each daily/weekly timestamp to 09:15 IST of its trading date.
+
+    * A timestamp at midnight in its OWN timezone is a vendor date label: its local calendar date
+      is kept (``2026-11-23 00:00 UTC`` or ``00:00 America/New_York`` -> 23-Nov).
+    * Any other tz-aware timestamp is an instant, converted to IST first
+      (``2026-11-22 18:30 UTC`` == 23-Nov 00:00 IST -> 23-Nov; ``03:45 UTC`` -> same day).
+    * Naive timestamps are IST wall time.
+    """
+    if idx.tz is None:
+        local = idx
+    else:
+        wall = idx.tz_localize(None)
+        ist_wall = idx.tz_convert(IST).tz_localize(None)
+        local = wall.where(wall == wall.normalize(), ist_wall)
+    return pd.DatetimeIndex(pd.DatetimeIndex(local).normalize() + _SESSION_START).tz_localize(IST)
 
 
 def normalize_ohlcv(df: pd.DataFrame | None, timeframe: Timeframe | str | None = None) -> pd.DataFrame:
@@ -116,54 +132,72 @@ def normalize_ohlcv(df: pd.DataFrame | None, timeframe: Timeframe | str | None =
     return out
 
 
+#: IST is a fixed UTC+05:30 offset (Asia/Kolkata has no DST), so bucket keys are integer maths.
+_IST_OFFSET_NS = 19_800 * 1_000_000_000
+_NS_PER_MIN = 60 * 1_000_000_000
+_NS_PER_DAY = 1_440 * _NS_PER_MIN
+_OPEN_MIN = 9 * 60 + 15
+
+
+def _run_starts(values: np.ndarray) -> np.ndarray:
+    """Positions where a run of equal consecutive ``values`` begins."""
+    return np.flatnonzero(np.r_[True, values[1:] != values[:-1]])
+
+
 def resample_ohlcv(df: pd.DataFrame, timeframe: Timeframe | str) -> pd.DataFrame:
     """Resample a (finer) candle frame to ``timeframe``, session-aligned at 09:15 IST.
 
     The source must be at least as fine as the target (e.g. 5m -> 15m/1h/1d, 1d -> 1wk).
     Incomplete trailing buckets are kept - callers apply ``data.calendar.closed_bars`` to
-    drop bars that have not closed yet.
+    drop bars that have not closed yet. Rows with a missing price are ignored.
+
+    Candle frames are sorted, so every bucket is a contiguous run of rows: bucket keys are
+    computed with int64 maths on IST wall-clock nanoseconds and aggregated with numpy
+    ``reduceat`` (open first, high max, low min, close last, volume sum). pandas ``groupby`` costs
+    ~50x more per call, which matters in REPLAY where bars are rebuilt as the clock advances.
     """
     tf = as_timeframe(timeframe)
     if df is None or df.empty:
         return empty_ohlcv()
-    src = df if (isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None) else normalize_ohlcv(df)
-    idx = pd.DatetimeIndex(src.index).tz_convert(IST)
-    day = idx.normalize()
+    conforming = (isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None
+                  and df.index.is_monotonic_increasing and all(c in df.columns for c in OHLCV_COLUMNS))
+    src = df if conforming else normalize_ohlcv(df)
+    o, h, lo, c = (src[col].to_numpy(dtype="float64") for col in ("open", "high", "low", "close"))
+    vol = np.nan_to_num(src["volume"].to_numpy(dtype="float64"))
+    local = pd.DatetimeIndex(src.index).as_unit("ns").asi8 + _IST_OFFSET_NS   # IST wall clock, ns
+    day = local // _NS_PER_DAY * _NS_PER_DAY
+    keep = ~(np.isnan(o) | np.isnan(h) | np.isnan(lo) | np.isnan(c))
 
     if tf in INTRADAY_TIMEFRAMES:
         minutes = TIMEFRAME_MINUTES[tf]
-        offset_min = np.asarray((idx - (day + _SESSION_START)).total_seconds() // 60, dtype="int64")
-        in_session = (offset_min >= 0) & (offset_min < SESSION_MINUTES)
-        if not in_session.all():
-            src, idx, day, offset_min = src.loc[in_session], idx[in_session], day[in_session], offset_min[in_session]
-        bucket = day + _SESSION_START + pd.to_timedelta((offset_min // minutes) * minutes, unit="min")
-        keys = pd.DatetimeIndex(bucket)
-    elif tf == Timeframe.D1:
-        keys = pd.DatetimeIndex(day + _SESSION_START)
-    else:  # weekly: group by Monday of the week, label with first day present
-        monday = day - pd.to_timedelta(day.weekday, unit="D")
-        first_day = pd.Series(day, index=src.index).groupby(np.asarray(monday)).transform("min")
-        keys = pd.DatetimeIndex(pd.DatetimeIndex(first_day) + _SESSION_START)
-
-    if len(src) == 0:
+        offset = (local - day) // _NS_PER_MIN - _OPEN_MIN
+        keep &= (offset >= 0) & (offset < SESSION_MINUTES)        # regular session only
+        keys = day + (_OPEN_MIN + offset // minutes * minutes) * _NS_PER_MIN
+    else:
+        keys = day + _OPEN_MIN * _NS_PER_MIN
+    if not keep.all():
+        o, h, lo, c, vol, day, keys = (a[keep] for a in (o, h, lo, c, vol, day, keys))
+    if len(keys) == 0:
         return empty_ohlcv()
-    grouped = src.groupby(np.asarray(keys), sort=True)
+    if tf == Timeframe.W1:  # Monday-Sunday weeks, labelled with the first day present
+        monday = day - ((day // _NS_PER_DAY + 3) % 7) * _NS_PER_DAY             # 1970-01-01 was a Thursday
+        week = np.cumsum(np.r_[True, monday[1:] != monday[:-1]]) - 1
+        keys = day[_run_starts(monday)][week] + _OPEN_MIN * _NS_PER_MIN
+
+    starts = _run_starts(keys)
+    last = np.r_[starts[1:], len(keys)] - 1
+    index = pd.to_datetime(keys[starts] - _IST_OFFSET_NS, unit="ns", utc=True).tz_convert(IST)
     out = pd.DataFrame(
         {
-            "open": grouped["open"].first(),
-            "high": grouped["high"].max(),
-            "low": grouped["low"].min(),
-            "close": grouped["close"].last(),
-            "volume": grouped["volume"].sum(),
-        }
+            "open": o[starts],
+            "high": np.fmax.reduceat(h, starts),
+            "low": np.fmin.reduceat(lo, starts),
+            "close": c[last],
+            "volume": np.add.reduceat(vol, starts),
+        },
+        index=pd.DatetimeIndex(index, name="ts"),
     )
-    out.index = pd.DatetimeIndex(out.index)
-    if out.index.tz is None:
-        out.index = out.index.tz_localize(IST)
-    else:
-        out.index = out.index.tz_convert(IST)
-    out.index.name = "ts"
-    return out.dropna(subset=["close"]).astype("float64")
+    return out.astype("float64")
 
 
 def session_time(ts: pd.Timestamp) -> time:

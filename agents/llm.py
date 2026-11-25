@@ -340,10 +340,11 @@ class FakeLLMClient(_RetryingClient):
     """Scripted client for tests: same retry / validation loop as ``OllamaClient``.
 
     ``responses`` maps agent name -> a list of answers consumed in order (the last one is
-    reused when the list runs out) or a single callable. Each answer is a ``dict`` (sent as
-    JSON), a ``str`` (sent verbatim, may be invalid JSON), an exception instance (raised as
-    a transport error) or ``callable(system, user) -> dict | str``. The key ``"*"`` is the
-    default for agents without their own entry. Every call is recorded in ``calls``.
+    reused when the list runs out), a single answer, or a single callable. Each answer is a
+    ``dict`` (sent as JSON), a ``str`` (sent verbatim, may be invalid JSON), an exception
+    instance (raised as a transport error) or ``callable(system, user) -> dict | str``. The
+    key ``"*"`` is the default for agents without their own entry. Every call is recorded in
+    ``calls``.
     """
 
     backend = "fake"
@@ -356,8 +357,14 @@ class FakeLLMClient(_RetryingClient):
         healthy: bool = True,
     ) -> None:
         super().__init__(max_retries=max_retries)
-        self._responses: dict[str, Any] = {k: (list(v) if isinstance(v, (list, tuple)) else v)
-                                           for k, v in (responses or {}).items()}
+        self._responses: dict[str, Any] = {}
+        for key, value in (responses or {}).items():
+            if isinstance(value, (list, tuple)):
+                self._responses[key] = list(value)
+            elif isinstance(value, (Mapping, str, BaseException)):
+                self._responses[key] = [value]  # a single scripted answer
+            else:
+                self._responses[key] = value  # callable(system, user)
         self._positions: dict[str, int] = {}
         self._models = list(models)
         self._healthy = healthy

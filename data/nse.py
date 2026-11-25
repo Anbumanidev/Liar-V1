@@ -17,6 +17,7 @@ Design
 from __future__ import annotations
 
 import csv
+import functools
 import io
 import json
 import re
@@ -24,7 +25,7 @@ import threading
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from loguru import logger
 
@@ -235,24 +236,69 @@ def parse_holiday_master(payload: Any, segment: str = "CM") -> dict[date, str]:
     return out
 
 
+_RE_PLEDGE_KEY = re.compile(r"(pledg|encumb).*(perc|per|pct|%)|(perc|per|pct|%).*(pledg|encumb)", re.IGNORECASE)
+_RE_PROMOTER_SHARES_KEY = re.compile(r"(perc|pct).*promoter.*share", re.IGNORECASE)
+
+
+def _pledge_key_rank(key: str) -> int | None:
+    """Rank of a payload key as the 'pledged % of promoter holding' field (lower is better).
+
+    ``0`` explicit pledged/encumbered percentage, ``1`` the same expressed of TOTAL shares,
+    ``2`` NSE-style ``percPromoterShares``; ``None`` otherwise. A promoter HOLDING percentage
+    (e.g. ``percPromoterHolding``) is never a pledge figure.
+    """
+    k = key.lower()
+    if "holding" in k:
+        return None
+    if _RE_PLEDGE_KEY.search(k):
+        return 1 if "tot" in k else 0
+    if _RE_PROMOTER_SHARES_KEY.search(k):
+        return 2
+    return None
+
+
 def parse_pledge(payload: Any) -> float | None:
-    """Best-effort promoter-pledge % from ``corporate-pledgedata`` (field names vary)."""
+    """Best-effort promoter-pledge % from ``corporate-pledgedata`` (field names vary; first row = latest)."""
     rows = payload.get("data") if isinstance(payload, dict) else payload
     if not rows or not isinstance(rows, list):
         return None
-    pattern = re.compile(r"(perc|per).*?(pledg|encumb|promoter)|(pledg|encumb).*?(perc|per)", re.IGNORECASE)
     for row in rows:
         if not isinstance(row, dict):
             continue
+        best: tuple[int, float] | None = None
         for key, value in row.items():
-            if pattern.search(str(key)):
-                num = _f(value)
-                if num is not None:
-                    return num
+            rank = _pledge_key_rank(str(key))
+            num = _f(value) if rank is not None else None
+            if rank is not None and num is not None and (best is None or rank < best[0]):
+                best = (rank, num)
+        if best is not None:
+            return best[1]
     return None
 
 
 # =========================================================================== client
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _failsafe(default: Callable[[], Any]) -> Callable[[_F], _F]:
+    """Decorator for public ``NSEClient`` calls: any exception (odd payload shapes included) is
+    logged / recorded via ``NSEClient._failure`` and ``default()`` is returned - never raises."""
+
+    def deco(fn: _F) -> _F:
+        @functools.wraps(fn)
+        def wrapper(self: "NSEClient", *args: Any, **kwargs: Any) -> Any:
+            try:
+                return fn(self, *args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - NSE responses are unreliable
+                self._failure(f"{fn.__name__} failed: {type(exc).__name__}: {exc}",
+                              {"args": [str(a) for a in args]})
+                return default()
+
+        return wrapper  # type: ignore[return-value]
+
+    return deco
+
 
 
 class NSEClient:
@@ -371,6 +417,7 @@ class NSEClient:
                 session.close()
 
     # ------------------------------------------------------------------ API
+    @_failsafe(dict)
     def holiday_map(self) -> dict[date, str]:
         """``{date: description}`` of NSE equity (CM) trading holidays as published."""
         data = self._fetch("holidays_trading", f"{NSE_BASE}/api/holiday-master", {"type": "trading"}, _TTL_WEEK)
@@ -380,10 +427,12 @@ class NSEClient:
             self._failure(f"holiday parse failed: {exc}", {})
             return {}
 
+    @_failsafe(set)
     def holidays(self, year: int) -> set[date]:
         """NSE equity trading holidays of ``year`` (empty on failure)."""
         return {d for d in self.holiday_map() if d.year == year}
 
+    @_failsafe(set)
     def asm_symbols(self) -> set[str]:
         """Symbols currently under (long- or short-term) Additional Surveillance Measure."""
         today = self.clock.now().date()
@@ -395,6 +444,7 @@ class NSEClient:
                 out |= {str(r.get("symbol", "")).strip().upper() for r in rows if isinstance(r, dict) and r.get("symbol")}
         return out
 
+    @_failsafe(set)
     def gsm_symbols(self) -> set[str]:
         """Symbols currently under Graded Surveillance Measure."""
         today = self.clock.now().date()
@@ -402,6 +452,7 @@ class NSEClient:
         rows = data.get("data", []) if isinstance(data, dict) else data if isinstance(data, list) else []
         return {str(r.get("symbol", "")).strip().upper() for r in rows if isinstance(r, dict) and r.get("symbol")}
 
+    @_failsafe(dict)
     def fii_dii(self) -> dict[str, Any]:
         """Latest provisional FII/DII cash-market flows in Rs crore (empty dict on failure).
 
@@ -412,6 +463,8 @@ class NSEClient:
         data = self._fetch(f"fiidii_{today:%Y%m%d}", f"{NSE_BASE}/api/fiidiiTradeReact", None, _TTL_SHORT)
         out: dict[str, Any] = {}
         for row in data if isinstance(data, list) else []:
+            if not isinstance(row, dict):
+                continue
             cat = str(row.get("category", "")).upper()
             prefix = "fii" if cat.startswith("FII") else "dii" if cat.startswith("DII") else None
             if prefix is None:
@@ -424,6 +477,7 @@ class NSEClient:
                 out["date"] = d.isoformat()
         return out
 
+    @_failsafe(list)
     def corporate_actions(self, start: date, end: date) -> list[MarketEvent]:
         """Ex-dates (dividends with amount, splits/bonus with ratio, rights, AGM ...) in ``[start, end]``."""
         params = {"index": "equities", "from_date": f"{start:%d-%m-%Y}", "to_date": f"{end:%d-%m-%Y}"}
@@ -436,6 +490,7 @@ class NSEClient:
             return []
         return [e for e in events if start <= e.event_date <= end]
 
+    @_failsafe(list)
     def event_calendar(self, start: date, end: date) -> list[MarketEvent]:
         """Board meetings / results dates in ``[start, end]``."""
         params = {"index": "equities", "from_date": f"{start:%d-%m-%Y}", "to_date": f"{end:%d-%m-%Y}"}
@@ -447,6 +502,7 @@ class NSEClient:
             return []
         return [e for e in events if start <= e.event_date <= end]
 
+    @_failsafe(list)
     def announcements(self, symbol: str | None, since: datetime) -> list[Headline]:
         """Corporate announcements since ``since`` (up to ``clock.now()``), optionally for one symbol."""
         now = to_ist(self.clock.now())
@@ -463,6 +519,7 @@ class NSEClient:
             self._failure(f"announcements parse failed: {exc}", {})
             return []
 
+    @_failsafe(dict)
     def delivery_map(self, day: date) -> dict[str, float]:
         """``{SYMBOL: delivery %}`` from the full bhavcopy of ``day`` (empty if unavailable)."""
         key = f"delivery_{day:%Y%m%d}"
@@ -488,10 +545,12 @@ class NSEClient:
                     logger.debug(f"[nse] could not remove raw bhavcopy cache: {exc}")
         return parsed
 
+    @_failsafe(lambda: None)
     def delivery_pct(self, symbol: str, day: date) -> float | None:
         """Delivery % of ``symbol`` on ``day`` (bhavcopy), None if unknown."""
         return self.delivery_map(day).get(symbol.upper())
 
+    @_failsafe(lambda: None)
     def advance_decline(self) -> float | None:
         """Advance/decline ratio of NIFTY 500 (fallback: market-wide / NIFTY 50); None on failure."""
         data = self._fetch(f"allindices_{self.clock.now():%Y%m%d%H}", f"{NSE_BASE}/api/allIndices", None,
@@ -510,6 +569,7 @@ class NSEClient:
             return round(adv / dec, 4)
         return None
 
+    @_failsafe(lambda: None)
     def pledge_pct(self, symbol: str) -> float | None:
         """Promoter shares pledged/encumbered (% of promoter holding), best effort."""
         today = self.clock.now().date()

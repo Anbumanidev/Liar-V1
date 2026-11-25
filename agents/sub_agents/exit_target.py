@@ -127,8 +127,8 @@ def target_candidates(ctx: StockContext, setup: StrategySignal, settings: "Setti
     obstacles: list[dict[str, Any]] = []
     seen: list[float] = []
     for label, price in sorted(raw, key=lambda x: sgn * (x[1] - entry)):
-        if price is None or sgn * (price - entry) <= 0:
-            continue  # not in the profit direction
+        if price is None or price <= 0 or sgn * (price - entry) <= 0:
+            continue  # not in the profit direction (or a non-positive R multiple of a wide SHORT)
         if any(abs(price - s) / entry * 100 < DEDUPE_PCT for s in seen):
             continue
         seen.append(price)

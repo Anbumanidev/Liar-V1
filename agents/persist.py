@@ -1,14 +1,20 @@
-"""Persistence of sub-agent reports into ``agent_reports`` (rule 0.7: everything is logged)."""
+"""Persistence of agent outputs (rule 0.7: everything is logged).
+
+* ``save_agent_reports`` -> ``agent_reports`` (one row per sub-agent report).
+* ``save_debate`` -> ``debates`` (bull / bear sides + full transcript).
+"""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from core.enums import Mode
 from core.logging import to_jsonable
-from core.types import AgentReport
-from storage.models import AgentReportRow
+from core.types import AgentReport, DebateResult
+from storage.models import AgentReportRow, DebateRow
 
 
 def report_to_row(
@@ -62,3 +68,40 @@ def link_reports_to_decision(session: Session, rows: Sequence[AgentReportRow], d
     for row in rows:
         row.decision_id = decision_id
     session.flush()
+
+
+def save_debate(
+    session: Session,
+    result: DebateResult,
+    *,
+    symbol: str,
+    mode: Mode,
+    created_at: datetime,
+    run_id: int | None = None,
+    batch_id: int | None = None,
+    decision_id: int | None = None,
+) -> DebateRow:
+    """Add one ``debates`` row for ``result`` (full transcript) and flush (the caller commits).
+
+    The model is taken from the transcript entries (``agents.debate.debate`` records the model
+    of every turn); ``"rules"`` for the deterministic debate.
+    """
+    models = sorted({str(t["model"]) for t in result.transcript if isinstance(t, dict) and t.get("model")})
+    row = DebateRow(
+        run_id=run_id,
+        batch_id=batch_id,
+        decision_id=decision_id,
+        symbol=symbol,
+        mode=Mode(mode).value,
+        rounds=int(result.rounds),
+        bull_json=to_jsonable(result.bull.model_dump(mode="json")) if result.bull else None,
+        bear_json=to_jsonable(result.bear.model_dump(mode="json")) if result.bear else None,
+        transcript_json=to_jsonable(result.transcript),
+        status=result.status.value,
+        model=", ".join(models)[:80] or None,
+        latency_ms=result.latency_ms,
+        created_at=created_at,
+    )
+    session.add(row)
+    session.flush()
+    return row

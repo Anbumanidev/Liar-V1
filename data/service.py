@@ -31,8 +31,8 @@ from loguru import logger
 from core.clock import Clock, to_ist
 from core.enums import TIMEFRAME_MINUTES, Timeframe
 from core.errors import DataUnavailableError
-from core.types import Quote, empty_ohlcv
-from data.bars import RESAMPLE_SOURCES, resample_ohlcv
+from core.types import Quote, empty_ohlcv, validate_ohlcv
+from data.bars import RESAMPLE_SOURCES, normalize_ohlcv, resample_ohlcv
 from data.base import DataProvider
 from data.calendar import INTRADAY_TIMEFRAMES, NSECalendar, as_timeframe, bar_close_time, closed_bars
 
@@ -169,16 +169,21 @@ class MarketDataService:
         tf = as_timeframe(timeframe)
         sym = symbol.strip().upper()
         now = to_ist(self.clock.now())
-        req_start = to_ist(start) if start is not None else self.lookback_start(tf, lookback_bars, now)
+        context = {"symbol": sym, "timeframe": tf.value}
         try:
+            req_start = to_ist(start) if start is not None else self.lookback_start(tf, lookback_bars, now)
             raw = self._get_raw(sym, tf, req_start, now)
+            out = closed_bars(raw, tf, now, self.calendar)
+            lo = pd.Timestamp(req_start.replace(hour=0, minute=0)) if tf in (Timeframe.D1, Timeframe.W1) \
+                else pd.Timestamp(req_start)
+            out = out.loc[out.index >= lo]
         except DataUnavailableError as exc:
-            self._fail(f"candles {sym} {tf.value}: {exc}", {"symbol": sym, "timeframe": tf.value})
+            self._fail(f"candles {sym} {tf.value}: {exc}", context)
             return empty_ohlcv()
-        out = closed_bars(raw, tf, now, self.calendar)
-        lo = pd.Timestamp(req_start.replace(hour=0, minute=0)) if tf in (Timeframe.D1, Timeframe.W1) \
-            else pd.Timestamp(req_start)
-        out = out.loc[out.index >= lo]
+        except Exception as exc:  # noqa: BLE001 - malformed provider output must never crash callers
+            logger.exception(f"[data] unexpected error building {sym} {tf.value} candles")
+            self._fail(f"candles {sym} {tf.value}: {type(exc).__name__}: {exc}", context)
+            return empty_ohlcv()
         if start is None:
             out = out.tail(lookback_bars)
         self._ok()
@@ -202,6 +207,12 @@ class MarketDataService:
             if df is None or df.empty:
                 errors.append(f"{provider.name}: empty")
                 continue
+            try:
+                df = self._conform(df, tf)
+            except (ValueError, TypeError) as exc:
+                errors.append(f"{provider.name}: malformed frame ({exc})")
+                logger.warning(f"[data] {provider.name} returned a malformed {tf.value} frame for {symbol}: {exc}")
+                continue
             with self._lock:
                 self._cache[key] = _CacheEntry(df, start, self._valid_until(tf, df, now), provider.name)
                 self.last_source[key] = provider.name
@@ -209,6 +220,14 @@ class MarketDataService:
                 logger.info(f"[data] {symbol} {tf.value} served by fallback {provider.name}")
             return df
         raise DataUnavailableError("; ".join(errors) or "no providers")
+
+    @staticmethod
+    def _conform(df: pd.DataFrame, tf: Timeframe) -> pd.DataFrame:
+        """Return ``df`` if it meets the candle contract, else its normalised copy (raises if hopeless)."""
+        try:
+            return validate_ohlcv(df)
+        except ValueError:
+            return normalize_ohlcv(df, tf)
 
     def _fetch_from(
         self, provider: DataProvider, symbol: str, tf: Timeframe, start: datetime, now: datetime
@@ -321,7 +340,8 @@ class MarketDataService:
                 continue
             if q is None:
                 continue
-            if to_ist(q.timestamp) > now:
+            # Re-read the clock: a live provider stamps its quote AFTER `now` was taken above.
+            if to_ist(q.timestamp) > to_ist(self.clock.now()):
                 logger.warning(f"[data] {provider.name} quote for {sym} is in the future ({q.timestamp}); ignored")
                 continue
             with self._lock:
@@ -350,11 +370,16 @@ class MarketDataService:
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"[data] bulk quotes via {provider.name} failed: {exc}")
                 continue
+            checked_at = to_ist(self.clock.now())  # quotes are stamped after `now` was taken
             for s, q in got.items():
-                if q is not None and to_ist(q.timestamp) <= now:
-                    out[s.upper()] = q
-                    with self._lock:
-                        self._quotes[s.upper()] = (now, q)
+                if q is None:
+                    continue
+                if to_ist(q.timestamp) > checked_at:
+                    logger.warning(f"[data] {provider.name} quote for {s} is in the future ({q.timestamp}); ignored")
+                    continue
+                out[s.upper()] = q
+                with self._lock:
+                    self._quotes[s.upper()] = (now, q)
         missing = [s for s in wanted if s not in out]
         if missing and len(missing) == len(wanted):
             self._fail(f"quotes: none of {len(wanted)} symbols available", {"symbols": missing[:20]})

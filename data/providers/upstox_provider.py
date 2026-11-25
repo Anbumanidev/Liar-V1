@@ -218,6 +218,9 @@ class UpstoxProvider(DataProvider):
         return df.loc[(df.index >= lo) & (df.index <= pd.Timestamp(end))]
 
     def get_quote(self, symbol: str) -> Quote | None:
+        if not self.configured:  # fail fast: do not download the instrument file for nothing
+            logger.debug(f"[upstox] not configured; no quote for {symbol}")
+            return None
         try:
             key = self.instrument_key(symbol)
             payload = self._get("/v2/market-quote/ltp", params={"instrument_key": key})

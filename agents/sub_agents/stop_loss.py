@@ -92,10 +92,18 @@ def validate_candidate(c: SLCandidate, setup: StrategySignal, atr: float | None,
     return None
 
 
-def rule_choice(cands: list[SLCandidate], valid: list[int]) -> int | None:
-    """Rule pick: the strategy's stop if valid, else the tightest valid candidate."""
+def rule_choice(cands: list[SLCandidate], valid: list[int], setup: StrategySignal | None = None) -> int | None:
+    """Rule pick: the strategy's stop if valid, else the tightest valid candidate.
+
+    The strategy stop is recognised by price (it is only appended as a separate
+    ``STRATEGY`` candidate when no other candidate already sits at that price).
+    """
     if not valid:
         return None
+    if setup is not None:
+        for i in valid:
+            if abs(cands[i].price - setup.stop_loss) <= PRICE_TOL:
+                return i
     for i in valid:
         if cands[i].method == SLMethod.STRATEGY:
             return i
@@ -120,7 +128,7 @@ class StopLossAgent(SetupAgent):
         reasons = [validate_candidate(c, setup, atr, bounds) for c in cands]
         valid = [i for i, r in enumerate(reasons) if r is None]
         return {"setup": setup, "atr": atr, "bounds": bounds, "cands": cands, "reasons": reasons,
-                "valid": valid, "rule": rule_choice(cands, valid)}
+                "valid": valid, "rule": rule_choice(cands, valid, setup)}
 
     def build_payload(self, ctx: StockContext, settings: "Settings | None" = None) -> dict[str, Any]:
         a = self._analyse(ctx, settings)

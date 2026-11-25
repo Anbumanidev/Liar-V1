@@ -143,10 +143,11 @@ class PaperBroker:
         return ist_datetime(nd, w_start), ist_datetime(nd, w_end)
 
     def _bars_since(self, symbol: str, since: datetime) -> list[tuple[datetime, Bar]]:
-        """Closed 1-minute bars (fallback 5-minute) with open time >= ``since``."""
+        """Closed 1-minute bars (fallback 5-minute, then daily for daily-only replays) with
+        open time >= ``since``."""
         if self.data is None:
             return []
-        for tf in (Timeframe.M1, Timeframe.M5):
+        for tf in (Timeframe.M1, Timeframe.M5, Timeframe.D1):
             try:
                 df = self.data.candles(symbol, tf, start=since)
             except Exception as exc:  # noqa: BLE001 - data failure: degrade to quotes

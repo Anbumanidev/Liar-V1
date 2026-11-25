@@ -5,7 +5,8 @@ Fixtures:
     settings        - default Settings from config/*.yaml
     session_factory - in-memory SQLite with all tables created
     session         - a Session from session_factory (rolled back / closed after test)
-    sim_clock       - SimulatedClock at 2026-11-24 09:15 IST (a Tuesday trading day)
+    sim_clock       - SimulatedClock at 2026-11-24 09:15 IST (Tuesday; NOTE: an NSE holiday -
+                      Guru Nanak Jayanti - so calendar-dependent tests use explicit dates)
     ctx             - AppContext wired with the above (no data/llm/notifier)
 JSONL logs are redirected to a temp dir for every test (autouse).
 """
