@@ -15,6 +15,7 @@ from core.enums import CommandType
 from storage.models import Batch, ControlCommand, DecisionRow, Order, Position, Trade
 from webui import queries as q
 from webui.deps import enqueue, get_ctx, get_user
+from webui.scope import funding_or_fallback, resolve_scope
 from webui.util import (
     NOT_AVAILABLE,
     NotAvailable,
@@ -38,43 +39,6 @@ def _batches_list(session: Any) -> list[dict[str, Any]]:
             for b in session.execute(select(Batch).where(Batch.deleted.is_(False)).order_by(Batch.id.desc())).scalars()]
 
 
-# =========================================================================== today
-
-
-@router.get("/today")
-def today(request: Request, date: str | None = Query(default=None),
-          batch_id: int | None = Query(default=None)) -> dict[str, Any]:
-    ctx = get_ctx(request)
-    now = ctx.clock.now()
-    day = parse_day(date, now.date())
-    lo, hi = day_bounds(day)
-    is_today = day == now.date()
-    with ctx.session() as s:
-        rows = q.trades_between(s, lo, hi, batch_id=batch_id, legs_in_range_only=True)
-        if is_today:
-            positions = q.open_positions(s, batch_id)
-        else:
-            stmt = select(Position).where(Position.status == "OPEN", Position.opened_at >= lo, Position.opened_at < hi)
-            if batch_id is not None:
-                stmt = stmt.where(Position.batch_id == batch_id)
-            positions = list(s.execute(stmt).scalars())
-        funnel = q.decision_funnel(s, lo, hi, batch_id)
-        timeline = q.day_timeline(s, lo, hi, batch_id)
-        eq_batch = batch_id
-        if eq_batch is None:
-            cur = q.current_batch(s)
-            eq_batch = cur.id if cur else None
-        equity = q.day_equity(s, lo, hi, eq_batch)
-    quotes = ctx.quotes.get_many([p.symbol for p in positions], wait=1.0) if (positions and is_today) else {}
-    open_rows = [q.position_row(p, quotes.get(p.symbol)) for p in positions]
-    summary = q.trade_totals(rows)
-    unreal = round(sum(r["unrealized"] or 0.0 for r in open_rows), 2)
-    summary |= {"unrealized": r2(unreal), "total": r2((summary["net"] or 0.0) + unreal), "open": len(open_rows)}
-    return {"day": day.isoformat(), "is_today": is_today, "batch_id": batch_id, "server_time": iso(now),
-            "summary": summary, "trades": rows, "open_positions": open_rows, "funnel": funnel,
-            "timeline": timeline, "equity": equity}
-
-
 # =========================================================================== journal
 
 
@@ -82,7 +46,10 @@ def today(request: Request, date: str | None = Query(default=None),
 def trades(request: Request, batch_id: int | None = Query(default=None), date_from: str | None = Query(None, alias="from"),
            date_to: str | None = Query(None, alias="to"), mode: str | None = Query(default=None),
            result: str | None = Query(default=None), symbol: str | None = Query(default=None),
-           limit: int = Query(default=300, ge=1, le=5000)) -> dict[str, Any]:
+           limit: int = Query(default=300, ge=1, le=5000), scope: str | None = Query(default=None, max_length=10),
+           date: str | None = Query(default=None)) -> dict[str, Any]:
+    """Completed-trade journal. ``scope=today|batch|all`` (+ ``date`` / ``batch_id``) sets the base range;
+    explicit ``from`` / ``to`` still narrow it (legacy params keep working without ``scope``)."""
     ctx = get_ctx(request)
     now = ctx.clock.now()
     lo = day_bounds(parse_day(date_from, now.date()))[0] if date_from else None
@@ -92,14 +59,23 @@ def trades(request: Request, batch_id: int | None = Query(default=None), date_fr
     res = result.strip().upper() if result else None
     if res and res not in RESULTS:
         raise HTTPException(status_code=422, detail=f"result must be one of {', '.join(RESULTS)}")
+    legs_only = False
+    scope_info = None
     with ctx.session() as s:
-        rows = q.trades_between(s, lo, hi, batch_id=batch_id, mode=mode_v, symbol=sym)
+        if scope:
+            sc = resolve_scope(s, now, scope, date, batch_id)
+            scope_info = sc.as_dict()
+            batch_id = sc.batch_id
+            lo = max(x for x in (lo, sc.lo) if x is not None) if (lo or sc.lo) else None
+            hi = min(x for x in (hi, sc.hi) if x is not None) if (hi or sc.hi) else None
+            legs_only = sc.is_today
+        rows = q.trades_between(s, lo, hi, batch_id=batch_id, mode=mode_v, symbol=sym, legs_in_range_only=legs_only)
         batches = _batches_list(s)
     if res:
         rows = [r for r in rows if r["result"] == res]
     totals = q.trade_totals(rows)
     return {"rows": rows[:limit], "count": len(rows), "truncated": len(rows) > limit, "totals": totals,
-            "batches": batches, "modes": ["INTRADAY", "BTST", "SWING", "POSITIONAL"]}
+            "batches": batches, "modes": ["INTRADAY", "BTST", "SWING", "POSITIONAL"], "scope": scope_info}
 
 
 def _chart_window(entry: datetime | None, exit_: datetime | None, now: datetime) -> dict[str, Any]:
@@ -133,7 +109,8 @@ def trade_detail(position_id: int, request: Request) -> dict[str, Any]:
             if d is not None:
                 decision = {"id": d.id, "time": iso(d.created_at), "confidence": d.confidence,
                             "confluence": r2(d.confluence_score), "grade": d.grade, "strategy": d.strategy,
-                            "final_action": d.final_action, "latency_ms": d.latency_ms}
+                            "final_action": d.final_action, "latency_ms": d.latency_ms,
+                            "risk_rule": d.risk_rule, "behaviour": q.behaviour_view(d.context_json, d.entry_price)}
         position = {
             "id": pos.id, "batch_id": pos.batch_id, "symbol": pos.symbol, "mode": pos.mode, "product": pos.product,
             "direction": pos.direction, "status": pos.status, "qty": pos.qty, "initial_qty": pos.initial_qty,
@@ -209,17 +186,7 @@ def batches(request: Request) -> dict[str, Any]:
     unreal = _unrealized_by_batch(ctx)
     settings = ctx.settings()
     with ctx.session() as s:
-        try:
-            summary = optional_attr("capital.funding", "funding_summary")(s)
-            source = "funding"
-        except NotAvailable:
-            summary = q.batches_fallback(s, unreal)
-            source = "fallback"
-        except Exception as exc:  # noqa: BLE001 - keep the page usable
-            logger.warning(f"[webui] funding_summary failed, using fallback: {exc}")
-            s.rollback()
-            summary = q.batches_fallback(s, unreal)
-            source = "fallback"
+        summary, source = funding_or_fallback(s, unreal)
         cur = q.current_batch(s)
         last_cmd = _last_new_batch_command(s)
         n_batches = int(s.execute(select(func.count(Batch.id))).scalar_one() or 0)
@@ -327,17 +294,25 @@ def new_batch(body: NewBatchBody, request: Request) -> dict[str, Any]:
 def decisions(request: Request, since_id: int | None = Query(default=None, ge=0),
               before_id: int | None = Query(default=None, ge=1), limit: int = Query(default=100, ge=1, le=500),
               action: str | None = Query(default=None, max_length=120), symbol: str | None = Query(default=None),
-              hide_filtered: bool = Query(default=False), date: str | None = Query(default=None)) -> dict[str, Any]:
+              hide_filtered: bool = Query(default=False), date: str | None = Query(default=None),
+              scope: str | None = Query(default=None, max_length=10), batch_id: int | None = Query(default=None)
+              ) -> dict[str, Any]:
+    """Analysis feed. ``scope=today|batch|all`` (+ ``date`` / ``batch_id``); legacy ``date`` alone = that day."""
     ctx = get_ctx(request)
+    now = ctx.clock.now()
     lo = hi = None
-    if date:
-        lo, hi = day_bounds(parse_day(date, ctx.clock.now().date()))
+    scope_info = None
     sym = clean_symbol(symbol) if symbol else None
     with ctx.session() as s:
+        if scope:
+            sc = resolve_scope(s, now, scope, date, batch_id)
+            lo, hi, batch_id, scope_info = sc.lo, sc.hi, sc.batch_id, sc.as_dict()
+        elif date:
+            lo, hi = day_bounds(parse_day(date, now.date()))
         rows = q.decision_feed(s, since_id=since_id, before_id=before_id, limit=limit, action=action, symbol=sym,
-                               hide_filtered=hide_filtered, lo=lo, hi=hi)
+                               hide_filtered=hide_filtered, lo=lo, hi=hi, batch_id=batch_id)
         latest = int(s.execute(select(func.max(DecisionRow.id))).scalar_one() or 0)
-    return {"rows": rows, "latest_id": latest}
+    return {"rows": rows, "latest_id": latest, "scope": scope_info}
 
 
 @router.get("/decisions/{decision_id}")

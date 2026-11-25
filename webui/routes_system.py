@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -9,13 +10,25 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from sqlalchemy import func, select
 
+from core.clock import IST
 from storage.models import ErrorLog
 from webui import queries as q
-from webui.candles import build_frame, frame_payload, tf_spec, trade_overlays
+from webui.candles import (
+    HISTORY_DAYS,
+    HISTORY_NOTE,
+    MAX_BARS,
+    RANGES,
+    earliest_available,
+    frame_payload,
+    load_window,
+    tf_spec,
+    trade_overlays,
+)
 from webui.deps import get_ctx
 from webui.logs import LOG_FILES, read_log
 from webui.stream import event_stream
 from webui.util import (
+    IST_OFFSET_S,
     NOT_AVAILABLE,
     NotAvailable,
     clean_symbol,
@@ -36,38 +49,55 @@ router = APIRouter(prefix="/api")
 
 @router.get("/candles")
 def candles(request: Request, symbol: str = Query(...), tf: str = Query(default="5m"),
-            bars: int = Query(default=300, ge=10, le=2000), date_from: str | None = Query(None, alias="from"),
-            date_to: str | None = Query(None, alias="to"), position_id: int | None = Query(default=None)
-            ) -> dict[str, Any]:
+            bars: int = Query(default=300, ge=10, le=MAX_BARS), date_from: str | None = Query(None, alias="from"),
+            date_to: str | None = Query(None, alias="to"), position_id: int | None = Query(default=None),
+            range_: str | None = Query(default=None, alias="range", max_length=4),
+            before: int | None = Query(default=None, ge=946_684_800, le=4_102_444_800)) -> dict[str, Any]:
+    """Chart window. ``before`` (chart time) = the ``bars`` bars ending before it (scroll-back);
+    ``range`` = 1D|5D|1M|3M|6M|1Y|5Y|MAX (clamped to the timeframe's history); else ``from``/``to`` or the
+    latest ``bars``. ``has_more`` / ``earliest_available`` tell the chart when to stop loading older bars."""
     ctx = get_ctx(request)
     sym = clean_symbol(symbol)
     try:
         spec = tf_spec(tf)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    rng = range_.strip().upper() if range_ else None
+    if rng is not None and rng not in RANGES:
+        raise HTTPException(status_code=422, detail=f"range must be one of {', '.join(RANGES)}")
     start, end = parse_dt(date_from), parse_dt(date_to)
+    before_dt = datetime.fromtimestamp(before - IST_OFFSET_S, tz=IST) if before is not None else None
     data = ctx.get_data()
     if data is None:
         raise HTTPException(status_code=503, detail="market data service unavailable")
+    now = ctx.clock.now()
     cache = request.app.state.candle_cache
-    key = (sym, spec.key, bars, iso(start), iso(end))
+    key = (sym, spec.key, bars, iso(start), iso(end), rng, before)
     frame = cache.get(key)
     if frame is None:
         try:
-            df = build_frame(data, sym, spec, bars, start, end)
+            calendar = ctx.get_calendar()
+        except Exception as exc:  # noqa: BLE001 - weekday fallback inside load_window
+            logger.warning(f"[webui] calendar unavailable for candles: {exc}")
+            calendar = None
+        try:
+            df, info = load_window(data, sym, spec, now, calendar, bars=bars, start=start, end=end, range_key=rng,
+                                   before=before_dt)
         except Exception as exc:  # noqa: BLE001 - data errors must not 500 the chart
             logger.warning(f"[webui] candles {sym} {spec.key} failed: {exc}")
-            df = None
-        frame = frame_payload(df, spec) if df is not None else frame_payload(None, spec)
+            df, info = None, {"has_more": False, "earliest_available": iso(earliest_available(spec, now)),
+                              "history_days": HISTORY_DAYS[spec.key], "history_note": HISTORY_NOTE[spec.key],
+                              "range": rng, "clamped": False, "start": None, "before": None, "error": True}
+        frame = {**frame_payload(df, spec), **info}
         if frame["candles"]:
             cache.put(key, frame)
     times = [c["time"] for c in frame["candles"]]
     with ctx.session() as s:
-        markers, lines = trade_overlays(s, sym, times, spec, position_id=position_id)
+        markers, lines = trade_overlays(s, sym, times, spec, position_id=position_id, hi_time=before)
     quote = ctx.quotes.get_many([sym], wait=1.0).get(sym)
     return {"symbol": sym, "tf": spec.key, "source_tf": spec.source, "intraday": spec.intraday,
             "time_basis": "ist_epoch", **frame, "bars": len(frame["candles"]), "markers": markers, "lines": lines,
-            "quote": q.quote_dict(sym, quote), "as_of": iso(ctx.clock.now())}
+            "quote": q.quote_dict(sym, quote), "as_of": iso(now)}
 
 
 @router.get("/quotes")
@@ -144,13 +174,15 @@ def health(request: Request, date: str | None = Query(default=None)) -> dict[str
 
 @router.get("/logs")
 def logs(request: Request, file: str = Query(default="engine"), date: str | None = Query(default=None),
-         lines: int = Query(default=200, ge=1, le=2000), q_: str | None = Query(default=None, alias="q", max_length=120),
-         level: str | None = Query(default=None, max_length=12)) -> dict[str, Any]:
+         lines: int = Query(default=200, ge=1, le=3000), q_: str | None = Query(default=None, alias="q", max_length=120),
+         level: str | None = Query(default=None, max_length=12), stage: str | None = Query(default=None, max_length=120),
+         symbol: str | None = Query(default=None, max_length=32)) -> dict[str, Any]:
     ctx = get_ctx(request)
     if file not in LOG_FILES:
         raise HTTPException(status_code=422, detail=f"file must be one of {', '.join(LOG_FILES)}")
     day = parse_day(date, ctx.clock.now().date())
-    return read_log(ctx.log_dir, day, file, lines, query=q_, level=level) | {"files": list(LOG_FILES)}
+    out = read_log(ctx.log_dir, day, file, lines, query=q_, level=level, stage=stage, symbol=symbol)
+    return out | {"files": list(LOG_FILES)}
 
 
 @router.get("/stream")

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import re
 import signal
 import threading
 import time
@@ -20,8 +21,9 @@ from loguru import logger
 
 from control.processor import CommandProcessor
 from control.status import heartbeat, set_engine_state
-from core.clock import IST, to_ist
-from core.enums import EngineState
+from core.activity import activity
+from core.clock import IST, parse_hhmm, to_ist
+from core.enums import EngineState, Mode
 from core.logging import log_event
 from scheduler.jobs import run_job
 from scheduler.plan import DailyPlan
@@ -50,6 +52,9 @@ class TradingEngine:
         self._job_locks: dict[str, threading.Lock] = {}
         self._job_locks_guard = threading.Lock()
         self.skipped_jobs: dict[str, int] = {}
+        self._running: set[str] = set()
+        self._last_status_text = ""
+        self._last_status_log = 0.0
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -104,33 +109,121 @@ class TradingEngine:
         lock = self._job_lock(job)
         if not lock.acquire(blocking=False):
             self.skipped_jobs[job] = self.skipped_jobs.get(job, 0) + 1
-            logger.warning(f"[engine] job {job} skipped: the previous {job} is still running "
-                           f"({self.skipped_jobs[job]} skipped today)")
+            activity("cycle", f"{job} skipped: the previous {job} is still running "
+                              f"({self.skipped_jobs[job]} skipped today)", clock=self.svc.clock, level="warning",
+                     job=job)
             log_event("scans", {"event": "cycle_skipped", "job": job, "reason": "previous run still in progress",
                                 "skipped_total": self.skipped_jobs[job]}, clock=self.svc.clock)
             return
+        self._running.add(job)
+        t0 = time.monotonic()
         try:
-            logger.info(f"[engine] job {job} start")
+            activity("cycle", f"{job} started", clock=self.svc.clock, job=job)
             with self.svc.session() as s:
                 heartbeat(s, now=self.svc.clock.now(), batch_id=self.svc.ctx.batch_id,
-                          settings_version_id=self.svc.ctx.settings_version_id, activity=f"job {job}")
+                          settings_version_id=self.svc.ctx.settings_version_id, activity=f"running {job}")
                 s.commit()
             if job in self.LOCKED_JOBS:
                 with self._lock:
                     res = run_job(self.svc, job)
             else:
                 res = run_job(self.svc, job)
-            logger.info(f"[engine] job {job} done: {res}")
+            secs = time.monotonic() - t0
+            if isinstance(res, dict) and res.get("skipped"):
+                activity("cycle", f"{job} skipped: {res['skipped']}", clock=self.svc.clock, job=job)
+            else:
+                activity("cycle", f"{job} done in {secs:.0f}s: {_summarise(res)}", clock=self.svc.clock, job=job,
+                         seconds=round(secs, 1), actions=res.get("actions") if isinstance(res, dict) else None)
         finally:
+            self._running.discard(job)
             lock.release()
 
     def _next_cycle(self, now: datetime) -> datetime | None:
-        plan = DailyPlan(self.svc.settings)
-        for slot in plan.slots():
+        nxt = self._next_slot(now)
+        return nxt[0] if nxt else None
+
+    def _job_relevant(self, job: str) -> bool:
+        """False for slots that will only say "skipped" (disabled modes)."""
+        s = self.svc.settings
+        if job == "btst_scan":
+            return s.mode(Mode.BTST).enabled
+        if job == "intraday_cycle":
+            return s.mode(Mode.INTRADAY).enabled
+        if job == "swing_scan":
+            return s.mode(Mode.SWING).enabled or s.mode(Mode.POSITIONAL).enabled
+        if job in ("next_day_plan", "opening_check"):
+            return s.engine.next_day_plan_enabled
+        return True
+
+    SCAN_JOBS = frozenset({"intraday_cycle", "btst_scan", "swing_scan"})
+
+    def _next_slot(self, now: datetime, *, scans_only: bool = False) -> tuple[datetime, str] | None:
+        """Next relevant scheduled job (or scan) today (trading days only)."""
+        cal = self.svc.calendar
+        if cal is not None and not cal.is_trading_day(now.date()):
+            return None
+        for slot in DailyPlan(self.svc.settings).slots():
             ts = datetime.combine(now.date(), slot.at, tzinfo=IST)
-            if ts > now:
-                return ts
+            if ts > now and self._job_relevant(slot.job) and (not scans_only or slot.job in self.SCAN_JOBS):
+                return ts, slot.job
         return None
+
+    def status_text(self, now: datetime) -> str:
+        """One line for the terminal / dashboard: what the engine is doing and what runs next."""
+        if self.state != EngineState.RUNNING:
+            return f"{self.state.value.lower()} - no new scans until resumed (positions are still monitored)"
+        running = sorted(set(self._running)) + sorted(set(self.processor.active.values()))
+        if running:
+            return f"running {', '.join(running)}"
+        sc = self.svc.settings.schedule
+        cal = self.svc.calendar
+        if cal is not None and not cal.is_trading_day(now.date()):
+            nxt_day = cal.next_trading_day(now.date())
+            return (f"idle - {now:%a %d %b} is not an NSE trading day; next session {nxt_day:%a %d %b} "
+                    "(pre-market 08:30)")
+        start, end = parse_hhmm(sc.intraday_cycle_start), parse_hhmm(sc.intraday_cycle_end)
+        t = now.time()
+        if not self._job_relevant("intraday_cycle"):
+            why = "INTRADAY trading is disabled"
+        elif t < start:
+            why = f"intraday scans start at {start:%H:%M}"
+        elif t <= end:
+            why = f"between intraday scans (every {sc.intraday_cycle_minutes} min until {end:%H:%M})"
+        else:
+            why = f"intraday scans run {start:%H:%M}-{end:%H:%M} (over for today)"
+        nxt = self._next_slot(now)
+        scan = self._next_slot(now, scans_only=True)
+
+        def _when(slot: tuple[datetime, str]) -> str:
+            return f"{slot[1]} at {slot[0]:%H:%M} (in {max(0, int((slot[0] - now).total_seconds() // 60))} min)"
+
+        if nxt is None:
+            nxt_day = cal.next_trading_day(now.date()) if cal is not None else None
+            tail = f"no more jobs today; next session {nxt_day:%a %d %b}" if nxt_day else "no more jobs today"
+        else:
+            tail = f"next: {_when(nxt)}"
+            if scan is not None and scan != nxt:
+                tail += f"; next scan: {_when(scan)}"
+            elif scan is None:
+                tail += "; no more scans today"
+        return f"idle - {why}; {tail}. Use Scan now on the dashboard to analyse at any time."
+
+    def _fail_orphaned_commands(self) -> None:
+        """Commands left RUNNING by a previous engine process can never finish: mark them FAILED."""
+        from storage.models import ControlCommand
+
+        svc = self.svc
+        with svc.session() as s:
+            rows = s.query(ControlCommand).filter(ControlCommand.status == "RUNNING").all()
+            for row in rows:
+                row.status = "FAILED"
+                row.completed_at = svc.clock.now()
+                row.error = "engine restarted while this command was running - please retry"
+                row.result_json = {"ok": False, "message": row.error, "rule": None, "data": {}}
+            s.commit()
+        if rows:
+            activity("engine", f"{len(rows)} command(s) interrupted by the last stop marked FAILED", clock=svc.clock,
+                     level="warning")
 
     def _check_health(self) -> None:
         try:
@@ -171,11 +264,21 @@ class TradingEngine:
         if now_mono - self._last_health >= 120:
             self._last_health = now_mono
             self._check_health()
+        status = self.status_text(now)
+        key = _COUNTDOWN.sub("", status)   # the "(in N min)" countdown alone is not a change worth logging
+        if key != self._last_status_text or now_mono - self._last_status_log >= 600:
+            if not (key.startswith("running") and self._last_status_text.startswith("running")):
+                nxt = self._next_slot(now)
+                activity("engine", status, clock=svc.clock, state=self.state.value,
+                         next_job=nxt[1] if nxt else None, next_at=nxt[0].isoformat() if nxt else None)
+            self._last_status_text, self._last_status_log = key, now_mono
+        next_cycle = self._next_cycle(now)
         with svc.session() as s:
             heartbeat(s, now=now, batch_id=svc.ctx.batch_id, settings_version_id=svc.ctx.settings_version_id,
-                      next_cycle_at=self._next_cycle(now), market_open=market_open,
+                      next_cycle_at=next_cycle, market_open=market_open,
                       data_feed_ok=self._health["data"], llm_ok=self._health["llm"],
-                      status={"state": self.state.value})
+                      status={"state": self.state.value, "text": status}, activity=status[:500],
+                      clear_next_cycle=next_cycle is None)
             s.commit()
 
     def run(self) -> None:
@@ -186,9 +289,17 @@ class TradingEngine:
             set_engine_state(s, EngineState.RUNNING, now=svc.clock.now(), activity="started")
             s.commit()
         svc.extras["engine_state"] = EngineState.RUNNING
+        self._fail_orphaned_commands()
         if self.use_scheduler:
             self._schedule()
         logger.info("[engine] running (PAPER TRADING ONLY). Ctrl+C to stop.")
+        now = to_ist(svc.clock.now())
+        st = svc.settings
+        enabled = ", ".join(m.value for m in Mode if st.mode(m).enabled) or "none"
+        activity("engine", f"started: batch {svc.ctx.batch_id}, settings v{svc.ctx.settings_version_id}, "
+                           f"autonomy {st.modes.autonomy.value}, modes {enabled}, LLM {st.engine.llm_backend} "
+                           f"({st.models.model_for('technical')}). {self.status_text(now)}", clock=svc.clock,
+                 state="RUNNING")
         try:
             while not self._stop.is_set():
                 try:
@@ -199,12 +310,31 @@ class TradingEngine:
         finally:
             if self._scheduler is not None:
                 self._scheduler.shutdown(wait=False)
+            try:
+                self.processor.shutdown()   # queued Analyze/Scan commands -> FAILED, never left RUNNING
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[engine] command worker shutdown: {exc}")
+            activity("engine", "stopped", clock=svc.clock, state="STOPPED")
             with svc.session() as s:
                 set_engine_state(s, EngineState.STOPPED, now=svc.clock.now(), activity="stopped")
                 s.commit()
             if svc.notifier is not None:
                 svc.notifier.close(timeout=10)
             logger.info("[engine] stopped")
+
+
+_COUNTDOWN = re.compile(r" \(in \d+ min\)")
+
+
+def _summarise(res: Any) -> str:
+    """Short text for a job result dict."""
+    if not isinstance(res, dict):
+        return str(res)[:200]
+    if "actions" in res:
+        acts = ", ".join(f"{k} {v}" for k, v in sorted(res["actions"].items())) or "nothing analysed"
+        return f"{res.get('symbols', '?')} stock(s): {acts}"
+    keep = {k: v for k, v in res.items() if v not in (None, [], {}, 0)}
+    return (str(keep) if keep else "nothing to do")[:300]
 
 
 def seconds_until(now: datetime, target: datetime) -> float:

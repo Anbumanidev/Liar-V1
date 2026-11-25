@@ -150,6 +150,13 @@ class RunJobPayload(_P):
     job: str   # premarket | watchlist | intraday_cycle | btst_scan | swing_scan | positional_scan | eod | eod_report
 
 
+class ScanNowPayload(_P):
+    mode: Mode = Mode.INTRADAY
+    use_llm: bool = True        # False = deterministic screening only (seconds)
+    symbols: list[str] | None = Field(default=None, max_length=100)   # scan exactly these (default: watchlist)
+    watchlist_id: int | None = None                                   # or the stocks of one follow-up list
+
+
 PAYLOAD_MODELS: dict[CommandType, type[_P]] = {
     CommandType.ENGINE_START: EmptyPayload,
     CommandType.ENGINE_PAUSE: EmptyPayload,
@@ -179,6 +186,7 @@ PAYLOAD_MODELS: dict[CommandType, type[_P]] = {
     CommandType.REENABLE_STRATEGY: StrategyPayload,
     CommandType.SEND_TEST_EMAIL: EmptyPayload,
     CommandType.RUN_JOB: RunJobPayload,
+    CommandType.SCAN_NOW: ScanNowPayload,
 }
 
 #: Commands that are destructive and require a typed confirmation in the dashboard.

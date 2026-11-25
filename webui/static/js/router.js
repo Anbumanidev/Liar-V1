@@ -1,10 +1,12 @@
-// Tiny hash router: #/home, #/live, #/today, #/trade/12, #/trades, #/batches, #/batches/3, #/health, #/settings.
+// Tiny hash router: #/home, #/live, #/watchlists, #/today, #/trade/12, #/trades, #/batches, #/batches/3, #/health, #/settings.
 // Each page module exports `title` and `mount(root, params) -> cleanup()`; only the visible page runs timers.
 
 export const ROUTES = [
   { name: 'home', re: /^\/?(home)?$/, load: () => import('./pages/home.js'), nav: 'home' },
   { name: 'live', re: /^\/live$/, load: () => import('./pages/live.js'), nav: 'live' },
-  { name: 'today', re: /^\/today$/, load: () => import('./pages/today.js'), nav: 'today' },
+  { name: 'activity', re: /^\/activity$/, load: () => import('./pages/activity.js'), nav: 'activity' },
+  { name: 'watchlists', re: /^\/(watchlists|follow-up|followup)$/, load: () => import('./pages/watchlists.js'), nav: 'watchlists' },
+  { name: 'results', re: /^\/(results|today)$/, load: () => import('./pages/today.js'), nav: 'results' },
   { name: 'trade', re: /^\/trade\/(\d+)$/, keys: ['id'], load: () => import('./pages/trade.js'), nav: 'trades' },
   { name: 'trades', re: /^\/trades$/, load: () => import('./pages/trades.js'), nav: 'trades' },
   { name: 'batch', re: /^\/batches\/(\d+)$/, keys: ['id'], load: () => import('./pages/batches.js'), nav: 'batches' },

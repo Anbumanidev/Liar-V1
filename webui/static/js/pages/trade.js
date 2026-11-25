@@ -5,14 +5,16 @@ import { h, icon } from '../dom.js';
 import * as f from '../format.js';
 import * as ui from '../ui.js';
 import { pageTimers } from '../router.js';
-import { CandleChart } from '../charts.js';
+import { CandleChart, rangeBar, rangeState, OLDER_BARS } from '../charts.js';
 import { registerChart } from '../theme.js';
 import { agentsBlock, debateBlock, metaBlock, riskBlock, openDecision } from '../components/decision.js';
 import { closePositionButton } from '../components/controls.js';
+import { followUpButton } from '../components/followup.js';
+import { behaviourBlock } from '../components/behaviour.js';
 
 export const title = (p) => `Trade #${p.id}`;
 
-const TFS = ['1m', '5m', '10m', '15m', '1h'];
+const TFS = ['1m', '5m', '10m', '15m', '1h', '1d'];
 
 export function mount(root, params) {
   const t = pageTimers();
@@ -21,8 +23,12 @@ export function mount(root, params) {
     h('h1', null, `Trade #${id}`));
   const box = h('div', { class: 'chart-box medium' });
   const tfSeg = h('div');
+  const ranges = rangeBar((key) => { range = key; ranges.set(tf, range); loadChart(); },
+    { extra: [{ key: 'TRADE', label: 'Trade', title: 'Zoom to the trade (entry to exit)' }] });
   const chartCard = h('section', { class: 'card chart-card' },
-    h('div', { class: 'card-h' }, h('h2', null, 'Price action around the trade'), h('div', { class: 'actions' }, tfSeg)), box,
+    h('div', { class: 'card-h' }, h('h2', null, 'Price action around the trade'), h('div', { class: 'actions' }, tfSeg)),
+    h('div', { class: 'chart-tools sub' }, h('span', { class: 'grp-label' }, 'Range'), ranges,
+      h('span', { class: 'tiny faint hide-sm' }, 'scroll / zoom left to load older candles')), box,
     h('div', { class: 'card-b' }, h('div', { class: 'legend-keys' },
       h('span', { class: 'ent' }, h('i'), 'Entry'), h('span', { class: 'sl' }, h('i'), 'Initial SL (dotted) / final SL'),
       h('span', { class: 'tgt' }, h('i'), 'T1 / T2'), h('span', { class: 'ema9' }, h('i'), 'EMA 9'), h('span', { class: 'ema21' }, h('i'), 'EMA 21'),
@@ -31,14 +37,19 @@ export function mount(root, params) {
   const storyCard = ui.card('What happened', { body: ui.skeleton(4) });
   const diagCard = ui.card('Why it lost / what to fix', { body: ui.skeleton(3) });
   const ctxCard = ui.card('Decision context', { hint: 'why the system took this trade', body: ui.skeleton(4) });
+  const behCard = ui.card('Price behaviour at entry', { hint: 'deterministic check: chasing / fading moves' });
+  behCard.classList.add('hidden');
   const legsCard = ui.card('Exit legs & orders', { flush: true, body: ui.skeleton(3) });
   root.append(headBox, h('div', { class: 'strip', id: 'trade-strip' }, ui.skeleton(1)), chartCard,
-    h('div', { class: 'grid cols-2' }, factsCard, storyCard), diagCard, ctxCard, legsCard);
+    h('div', { class: 'grid cols-2' }, factsCard, storyCard), diagCard, behCard, ctxCard, legsCard);
 
   const chart = new CandleChart(box, { intraday: true });
   t.track(registerChart(chart));
   let detail = null;
   let tf = '5m';
+  let range = 'TRADE';
+  chart.enableHistory((before) => api.get('/api/candles' + qs({ symbol: detail.position.symbol, tf, bars: OLDER_BARS[tf] || 500, before,
+    position_id: id })));
 
   const lines = (d) => {
     const p = d.position;
@@ -50,22 +61,42 @@ export function mount(root, params) {
     return out;
   };
 
+  let chartSeq = 0;
   const loadChart = async () => {
     if (!detail) return;
     const c = detail.chart || {};
+    const my = ++chartSeq;
+    chart.resetHistory();
     chart.setMessage('Loading…');
+    const params = range === 'TRADE'
+      ? { symbol: detail.position.symbol, tf, from: c.from, to: c.to, bars: 600, position_id: id }
+      : { symbol: detail.position.symbol, tf, range, position_id: id };
     try {
-      const d = await api.get('/api/candles' + qs({ symbol: detail.position.symbol, tf, from: c.from, to: c.to, bars: 600, position_id: id }));
+      const d = await api.get('/api/candles' + qs(params));
+      if (my !== chartSeq) return;
       await chart.ready;
+      if (my !== chartSeq) return;
       chart.setIntraday(d.intraday);
       chart.setData({ ...d, lines: [] }, { keepRange: false, extraLines: lines(detail) });
-      if (!d.candles.length) chart.setMessage('No candles for this window (the data provider may not keep intraday history this far back). Try 15m or 1h.');
+      if (!d.candles.length) {
+        chart.setMessage(range === 'TRADE'
+          ? `No ${tf} candles for this window (${d.history_note || 'the provider does not keep intraday history this far back'}). Try 1H or 1D.`
+          : 'No candles for this range.');
+      }
     } catch (err) {
-      chart.setMessage(`Could not load candles: ${err.message}`);
+      if (my === chartSeq) chart.setMessage(`Could not load candles: ${err.message}`);
     }
   };
 
-  const drawTf = () => tfSeg.replaceChildren(ui.segmented(TFS.map((v) => ({ value: v, label: v.toUpperCase() })), tf, (v) => { tf = v; drawTf(); loadChart(); }, { cls: 'sm' }));
+  const drawTf = () => {
+    tfSeg.replaceChildren(ui.segmented(TFS.map((v) => ({ value: v, label: v.toUpperCase() })), tf, (v) => {
+      tf = v;
+      if (range !== 'TRADE' && !rangeState(tf, range).ok) range = 'TRADE';
+      drawTf();
+      loadChart();
+    }, { cls: 'sm' }));
+    ranges.set(tf, range);
+  };
 
   const load = async () => {
     try {
@@ -85,8 +116,12 @@ export function mount(root, params) {
     headBox.replaceChildren(h('a', { href: '#/trades', class: 'btn sm ghost' }, icon('arrowLeft', 14), 'Journal'),
       h('h1', null, p.symbol), ui.modeBadge(p.mode), ui.dirBadge(p.direction), ui.resultBadge(result),
       h('span', { class: 'sub' }, `#${p.id} · ${p.strategy || 'manual'} · ${f.dateTime(p.opened_at)} IST`), h('span', { class: 'grow' }),
+      followUpButton(p.symbol, { decisionId: p.decision_id, mode: p.mode, compact: true }),
       p.status === 'OPEN' ? closePositionButton({ ...p, qty: p.qty }, { onDone: load }) : null,
       p.decision_id ? h('button', { class: 'btn sm', onclick: () => openDecision(p.decision_id) }, 'Decision details') : null);
+    const beh = behaviourBlock(d.decision?.behaviour);
+    behCard.classList.toggle('hidden', !beh);
+    if (beh) behCard.body.replaceChildren(beh);
     const strip = document.getElementById('trade-strip');
     const cell = (label, value, sub = null) => h('div', { class: 'cell' }, h('div', { class: 'label' }, label), h('div', { class: 'value' }, value),
       sub ? h('div', { class: 'sub' }, sub) : null);

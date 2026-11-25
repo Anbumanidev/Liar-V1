@@ -8,8 +8,9 @@ Run::
 or from code: ``webui.server.run(host="127.0.0.1", port=8600)``; tests use ``create_app(ctx)``.
 
 The web process never places orders. Writes are limited to: login attempts/audit (via
-``dashboard.auth``), control commands (``control.commands.enqueue_command``) and settings
-versions (``config.store.apply_changes`` + ``RELOAD_SETTINGS``).
+``dashboard.auth``), control commands (``control.commands.enqueue_command``), settings
+versions (``config.store.apply_changes`` + ``RELOAD_SETTINGS``) and the owner's follow-up lists
+(``data.watchlists``, audited - owner data, not trading state).
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ def _absolute_lifetime(ctx: WebContext) -> timedelta:
 def create_app(ctx: WebContext | None = None) -> FastAPI:
     """Build the FastAPI app. ``ctx`` is injectable (tests); default = :func:`build_context`."""
     from dashboard.auth import IDLE_TIMEOUT
-    from webui import routes_core, routes_system, routes_trading
+    from webui import routes_core, routes_scope, routes_system, routes_trading, routes_watchlists
 
     ctx = ctx or build_context()
     secret = load_or_create_secret(ctx.secret_key_path)
@@ -71,8 +72,10 @@ def create_app(ctx: WebContext | None = None) -> FastAPI:
     app.state.candle_cache = CandleCache(ttl=ctx.candle_ttl)
 
     app.include_router(routes_core.router)
+    app.include_router(routes_scope.router)
     app.include_router(routes_trading.router)
     app.include_router(routes_system.router)
+    app.include_router(routes_watchlists.router)
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:

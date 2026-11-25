@@ -58,6 +58,26 @@
 <p style="margin:4px 0;color:#6b6a66;">No open positions.</p>
 {% endif %}
 
+{% if r.next_day_plan is defined and r.next_day_plan %}
+{% set plan_check = r.next_day_plan_check if (r.next_day_plan_check is defined and r.next_day_plan_check) else "09:20" %}
+{{ m.section("Tomorrow's intraday watchlist (paper plan, analysed again at " ~ plan_check ~ ")") }}
+{% if r.next_day_plan_for is defined and r.next_day_plan_for %}
+<p style="margin:0 0 6px 0;font-size:12px;color:#52514e;">For {{ r.next_day_plan_for|d }}: {{ r.next_day_plan|length }} stock{{ "s" if r.next_day_plan|length != 1 else "" }} ranked after today's close from daily bars (trend, relative strength, range compression, volume, distance to trigger, liquidity).</p>
+{% endif %}
+<div style="overflow-x:auto;">
+<table role="presentation" class="tbl" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+  <tr>{{ m.th("Symbol") }}{{ m.th("Setup") }}{{ m.th("Trigger", 'right') }}{{ m.th("Stop", 'right') }}{{ m.th("Target", 'right') }}{{ m.th("R:R", 'right') }}{{ m.th("Score", 'right') }}</tr>
+  {% for p in r.next_day_plan %}
+  <tr>{{ m.td(p.symbol ~ ("" if p.affordable else " *"), bold=true) }}{{ m.td((p.setup or "") ~ " " ~ (p.direction or "")) }}{{ m.td(p.trigger|price, 'right') }}{{ m.td(p.stop|price, 'right', COLOR_NEG) }}{{ m.td(p.target|price, 'right', COLOR_POS) }}{{ m.td(p.rr|num(1), 'right') }}{{ m.td(p.score|num(0), 'right') }}</tr>
+  {% if p.reasons %}
+  <tr><td colspan="7" style="padding:0 6px 6px 6px;font-size:11px;color:#6b6a66;border-bottom:1px solid #f1f1ef;">{{ p.reasons[:3]|join("; ") }}</td></tr>
+  {% endif %}
+  {% endfor %}
+</table>
+</div>
+<p style="margin:6px 0 0 0;font-size:11px;color:#6b6a66;">A deterministic paper plan, not advice. At {{ plan_check }} each stock is re-checked against the opening price (gapped more than 1 ATR past the trigger, or through the stop = dropped); the INTRADAY cycles then analyse the rest first, and every trade still needs the full AI analysis and the risk manager's approval.{% if r.next_day_plan|rejectattr('affordable')|list %} * not affordable at the current capital (shown for information only).{% endif %}</p>
+{% endif %}
+
 {{ m.section("Capital") }}
 {% if c.available %}
 {{ m.kv([

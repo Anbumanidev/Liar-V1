@@ -257,6 +257,15 @@ class RiskSettings(_Cfg):
     live_rr_tolerance: float = Field(default=0.8, gt=0, le=1)           # R:R at the live price >= min_rr x this
     min_room_r: float = Field(default=1.0, ge=0)                        # NO_ROOM: nearest opposing level in R (0 = off)
     fill_rr_min: float = Field(default=1.0, ge=0)                       # cancel an entry if R:R at the fill price < this
+    # ---- price behaviour check (CHASING_HIGH / HISTORY_FADES; INTRADAY + BTST system trades)
+    behaviour_check_enabled: bool = True
+    max_range_pos_long: float = Field(default=0.80, gt=0, le=1)       # top 20 % of the day's range ...
+    max_vwap_ext_atr: float = Field(default=2.5, gt=0)                #   ... and > 2.5 ATR above VWAP, or ...
+    exhausted_range_adr: float = Field(default=1.0, gt=0)             #   ... the day already moved >= 1x its ADR
+    exhausted_max_range_pos: float = Field(default=0.60, gt=0, le=1)  # exhausted day: no longs above 60 % of range
+    min_continuation_rate: float = Field(default=0.35, ge=0, le=1)    # HISTORY_FADES below this ...
+    behaviour_min_samples: int = Field(default=6, ge=1, le=60)        #   ... with at least this many past sessions
+    behaviour_sessions: int = Field(default=20, ge=5, le=60)          # sessions of 5m history examined
 
     _v_times = field_validator(
         "intraday_no_entry_before", "intraday_no_entry_after", "intraday_squareoff", "conversion_cutoff"
@@ -348,6 +357,13 @@ class EngineSettings(_Cfg):
     # FILTERED with the reason. Keeps one 5-minute cycle inside 5 minutes on a 6 GB GPU.
     max_llm_candidates_per_cycle: int = Field(default=2, ge=1, le=50)
     cycle_llm_budget_seconds: int = Field(default=240, ge=30, le=3600)  # stop starting LLM analyses after this
+    max_llm_candidates_evening: int = Field(default=8, ge=1, le=100)    # SWING/POSITIONAL evening scan (no time budget)
+    # ---- end-of-day plan for the next session + follow-up lists
+    next_day_plan_enabled: bool = True
+    next_day_universe: str = "NIFTY100"            # NIFTY50 | NIFTY100 | NIFTY200 | FNO | CUSTOM
+    next_day_max_candidates: int = Field(default=10, ge=1, le=50)
+    next_day_min_score: float = Field(default=55.0, ge=0, le=100)
+    followup_priority: bool = True                 # INTRADAY cycles analyse the plan + "use for trading" lists first
 
 
 class ModelProfile(_Cfg):
@@ -437,6 +453,8 @@ class ScheduleSettings(_Cfg):
     cnc_time_stop: str = "15:20"
     eod_processing: str = "15:30"
     eod_report: str = "15:45"
+    next_day_plan: str = "15:40"      # rank tomorrow's INTRADAY candidates (after EOD, before the EOD e-mail)
+    opening_check: str = "09:20"      # re-check today's plan against the opening prices
     swing_scan: str = "16:00"
     swing_scan_deadline: str = "18:00"
     approval_timeout_check_seconds: int = Field(default=15, ge=5)

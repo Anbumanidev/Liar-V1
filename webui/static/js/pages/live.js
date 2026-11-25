@@ -1,19 +1,26 @@
 // Live: analysis feed (every analysed stock) | candlestick chart | open positions + watch list.
+// The chart loads a default range per timeframe, lazy-loads older candles when scrolled/zoomed to the
+// left edge (until the provider's history ends) and merges periodic refreshes of the newest bars.
 import { api, on, qs } from '../api.js';
 import { h, icon, debounce } from '../dom.js';
 import * as f from '../format.js';
 import * as ui from '../ui.js';
 import { pageTimers } from '../router.js';
-import { CandleChart } from '../charts.js';
+import { CandleChart, rangeBar, rangeState, DEFAULT_LOAD, DEFAULT_VIEW, OLDER_BARS } from '../charts.js';
 import { registerChart } from '../theme.js';
 import { openDecision } from '../components/decision.js';
 import { positionCard } from '../components/positions.js';
 import { store } from '../store.js';
+import { scopeParams, scopeLabel, inScope } from '../scope.js';
+import { scanNowControls } from '../components/controls.js';
+import { activityRow, RunningTracker, runningStrip, LoadGate } from '../components/activity.js';
+import { followUpButton, followUpExtra } from '../components/followup.js';
 
 export const title = (p) => (p?.symbol ? `${p.symbol} · Live` : 'Live');
 
 const TF_INTRADAY = [['1m', '1m'], ['5m', '5m'], ['10m', '10m'], ['15m', '15m'], ['20m', '20m'], ['30m', '30m']];
 const TF_LONG = [['1h', '1H'], ['5h', '5H'], ['1d', '1D'], ['1wk', '1W']];
+const TF_KEYS = [...TF_INTRADAY, ...TF_LONG].map(([v]) => v);
 const ACTIONS = ['EXECUTED', 'QUEUED', 'RISK_REJECTED', 'NO_TRADE', 'ANALYZED', 'SIGNAL_ONLY', 'FILTERED'];
 const SYM_RE = /^[A-Z0-9][A-Z0-9&\-_.^]{0,23}$/;
 
@@ -24,9 +31,11 @@ function savePref(key, v) { try { localStorage.setItem(`liar.live.${key}`, JSON.
 
 export function mount(root, params) {
   const t = pageTimers();
+  const tf0 = params.tf || pref('tf', '10m');
   const st = {
     symbol: (params.symbol || pref('symbol', '') || '').toUpperCase(),
-    tf: params.tf || pref('tf', '10m'),
+    tf: TF_KEYS.includes(tf0) ? tf0 : '10m',
+    range: null,                  // active range button (null = default view of the timeframe)
     toggles: pref('toggles', { ema9: true, ema21: true, vwap: true, volume: true }),
     hidden: new Set(pref('hiddenActions', [])),
     oldest: null,
@@ -57,18 +66,24 @@ export function mount(root, params) {
       ui.actionChip(r.final_action)),
     h('div', { class: 'why clamp-2' }, r.reason || '–')));
 
+  // A scope change while a request is in flight must never let the stale response overwrite the feed.
+  let feedSeq = 0;
   const loadFeed = async (older = false) => {
+    const my = older ? feedSeq : ++feedSeq;
     try {
-      const d = await api.get('/api/decisions' + qs({ limit: 80, before_id: older ? st.oldest : null }), { background: !older });
+      feedCard.head.querySelector('.hint').textContent = `${scopeLabel()} · newest first`;
+      const d = await api.get('/api/decisions' + qs({ limit: 80, before_id: older ? st.oldest : null, ...scopeParams() }), { background: !older });
+      if (my !== feedSeq) return;
       const rows = d.rows || [];
       if (!older) { feedList.replaceChildren(); for (const a of ACTIONS) counts[a] = 0; }
+      feedList.querySelector('.empty')?.remove();
       for (const r of rows) { feedList.appendChild(feedRow(r, false)); counts[r.final_action] = (counts[r.final_action] || 0) + 1; }
       if (rows.length) st.oldest = rows[rows.length - 1].id;
       moreBtn.classList.toggle('hidden', rows.length < 80);
-      if (!feedList.children.length) feedList.replaceChildren(ui.empty('No analysis yet', 'When the engine scans stocks, each one appears here with its outcome and the reason.', 'live'));
+      if (!feedList.children.length) feedList.replaceChildren(ui.empty('No analysis in this scope yet', 'When the engine scans stocks (or you press Scan now), each one appears here with its outcome and the reason.', 'live'));
       drawChips();
       if (!st.symbol && rows[0]) setSymbol(rows.find((r) => r.final_action !== 'FILTERED')?.symbol || rows[0].symbol);
-    } catch (err) { feedList.replaceChildren(ui.errorBox(err)); }
+    } catch (err) { if (my === feedSeq) feedList.replaceChildren(ui.errorBox(err)); }
   };
   moreBtn.addEventListener('click', () => ui.busy(moreBtn, () => loadFeed(true)));
 
@@ -83,20 +98,27 @@ export function mount(root, params) {
     h('div', { class: 'seg sm' }, items.map(([v, l]) => { const b = h('button', { type: 'button', onclick: () => setTf(v) }, l); tfBtns.set(v, b); return b; })));
   const tog = (k, label) => ui.toggle(label, st.toggles[k], (v) => { st.toggles[k] = v; savePref('toggles', st.toggles); chart.setToggles({ [k]: v }); });
   const head = h('div', { class: 'chart-head' });
-  const modeSel = h('select', { class: 'input sm', style: { width: '120px' }, 'aria-label': 'Mode for analysis' },
+  const modeSel = h('select', { class: 'input sm', style: { width: '120px' }, 'aria-label': 'Mode for Analyze now / Scan now' },
     ['INTRADAY', 'BTST', 'SWING', 'POSITIONAL'].map((m) => h('option', { value: m }, m)));
   const analyzeBtn = h('button', { class: 'btn sm', title: 'Ask the engine to analyse this symbol now (analysis only, no trade)' }, icon('bolt', 13), 'Analyze now');
   analyzeBtn.addEventListener('click', () => {
     if (!st.symbol) return;
-    ui.sendCommand(analyzeBtn, `Analyze ${st.symbol}`, () => api.post('/api/control', { action: 'analyze_now', symbol: st.symbol, mode: modeSel.value }));
+    const sym = st.symbol; const mode = modeSel.value;
+    ui.sendCommand(analyzeBtn, `Analyze ${sym}`, () => api.post('/api/control', { action: 'analyze_now', symbol: sym, mode }),
+      { resultExtra: (res) => followUpExtra(res, { symbol: sym, mode }) });
   });
+  const ranges = rangeBar((key) => setRange(key));
   const box = h('div', { class: 'chart-box' });
   const chartCard = h('section', { class: 'card chart-card' },
-    h('div', { class: 'card-h' }, head, h('div', { class: 'actions' }, modeSel, analyzeBtn)),
+    h('div', { class: 'card-h' }, head, h('div', { class: 'actions' },
+      followUpButton(() => st.symbol, { mode: () => modeSel.value, compact: true }),
+      modeSel, analyzeBtn, scanNowControls({ compact: true, modeSelect: modeSel }))),
     h('div', { class: 'chart-tools' }, symInput, datalist,
       h('div', { class: 'tf-groups' }, tfGroup('Intraday', TF_INTRADAY), tfGroup('Long-term', TF_LONG)),
       h('span', { class: 'grow' }),
       h('div', { class: 'row nowrap' }, tog('ema9', 'EMA 9'), tog('ema21', 'EMA 21'), tog('vwap', 'VWAP'), tog('volume', 'Volume'))),
+    h('div', { class: 'chart-tools sub' }, h('span', { class: 'grp-label' }, 'Range'), ranges,
+      h('span', { class: 'tiny faint hide-sm' }, 'scroll / zoom left to load older candles')),
     box,
     h('div', { class: 'card-b' }, h('div', { class: 'legend-keys' },
       h('span', { class: 'ema9' }, h('i'), 'EMA 9'), h('span', { class: 'ema21' }, h('i'), 'EMA 21'), h('span', { class: 'vwap' }, h('i'), 'VWAP (intraday)'),
@@ -104,20 +126,30 @@ export function mount(root, params) {
       h('span', { class: 'faint' }, '▲▼ trade entries/exits · times in IST · closed bars only'))));
   const chart = new CandleChart(box, { intraday: true });
   chart.setToggles(st.toggles);
+  chart.enableHistory((before) => api.get('/api/candles' + qs({ symbol: st.symbol, tf: st.tf, bars: OLDER_BARS[st.tf] || 500, before })));
   t.track(registerChart(chart));
 
+  const ltpLine = (d) => (d.quote && f.isNum(d.quote.ltp) ? [{ price: d.quote.ltp, kind: 'ltp', title: 'LTP' }] : []);
   let loadSeq = 0;
-  const loadChart = async (fit = false) => {
+  /** full = (re)load the symbol / timeframe / range; otherwise merge a refresh of the newest bars. */
+  const loadChart = async (full = false) => {
     if (!st.symbol) { chart.setMessage('Pick a symbol from the feed or type one above.'); paintHead(null); return; }
     const my = ++loadSeq;
-    if (fit) chart.setMessage('Loading…');
+    if (full) { chart.resetHistory(); chart.setMessage('Loading…'); }
     try {
-      const d = await api.get('/api/candles' + qs({ symbol: st.symbol, tf: st.tf, bars: 300 }), { background: !fit });
+      const params = full || !chart.bars.length ? { symbol: st.symbol, tf: st.tf, range: st.range || DEFAULT_LOAD[st.tf] || '5D' }
+        : { symbol: st.symbol, tf: st.tf, bars: 60 };
+      const d = await api.get('/api/candles' + qs(params), { background: !full });
       if (my !== loadSeq) return;
       await chart.ready;
+      if (my !== loadSeq) return;
       chart.setIntraday(d.intraday);
-      const extra = d.quote && f.isNum(d.quote.ltp) ? [{ price: d.quote.ltp, kind: 'ltp', title: 'LTP' }] : [];
-      chart.setData(d, { keepRange: !fit, extraLines: extra });
+      if (params.range) {
+        chart.setData(d, { fit: !!st.range, extraLines: ltpLine(d) });
+        if (!st.range) chart.showRecent(DEFAULT_VIEW[st.tf] ?? 'session');
+      } else {
+        chart.mergeLatest(d, { extraLines: ltpLine(d) });
+      }
       paintHead(d);
     } catch (err) {
       if (my !== loadSeq) return;
@@ -126,14 +158,22 @@ export function mount(root, params) {
   };
   const paintHead = (d) => {
     const q = d?.quote;
+    const n = chart.bars.length;
     head.replaceChildren(h('span', { class: 'sym' }, st.symbol || '—'),
       q ? h('span', { class: 'ltp' }, f.price(q.ltp)) : null,
       q && f.isNum(q.change_pct) ? h('span', { class: ['strong', f.tone(q.change)] }, `${f.signed(q.change)} (${f.pct(q.change_pct, { sign: true })})`) : null,
-      d ? h('span', { class: 'faint small' }, `${d.tf.toUpperCase()} · ${d.bars} bars · as of ${f.time(d.as_of)} IST`) : null);
+      d ? h('span', { class: 'faint small' }, `${d.tf.toUpperCase()} · ${n} bars${n ? ` from ${f.date(chart.bars[0].time * 1000 - 19800000)}` : ''} · as of ${f.time(d.as_of)} IST`) : null);
+  };
+  const setRange = (key) => {
+    st.range = key;
+    ranges.set(st.tf, st.range);
+    loadChart(true);
   };
   const setTf = (tf) => {
     st.tf = tf; savePref('tf', tf);
+    if (st.range && !rangeState(tf, st.range).ok) st.range = null;
     for (const [v, b] of tfBtns) b.classList.toggle('on', v === tf);
+    ranges.set(tf, st.range);
     loadChart(true);
   };
   const setSymbol = (raw) => {
@@ -146,12 +186,14 @@ export function mount(root, params) {
     loadChart(true);
   };
   for (const [v, b] of tfBtns) b.classList.toggle('on', v === st.tf);
+  ranges.set(st.tf, st.range);
 
   // ------------------------------------------------------------------ side column
   const posBody = h('div', null, ui.skeleton(3));
   const watchBody = h('div', null, ui.skeleton(5));
   const posCard = ui.card('Open positions', { body: posBody });
-  const watchCard = ui.card('Watch list', { hint: 'recently analysed', body: watchBody, flush: true });
+  const watchCard = ui.card('Watch list', { hint: 'recently analysed', body: watchBody, flush: true,
+    actions: h('a', { href: '#/watchlists', class: 'btn sm ghost', title: 'Your follow-up lists' }, 'Follow-up →') });
   const renderPositions = (o) => {
     const rows = o?.positions || [];
     posCard.head.querySelector('h2').textContent = `Open positions (${rows.length})`;
@@ -172,14 +214,53 @@ export function mount(root, params) {
     } catch (err) { watchBody.replaceChildren(ui.errorBox(err)); }
   };
 
+  const tracker = new RunningTracker();
+  const strip = runningStrip(tracker);
+  const actList = h('div', { class: 'act-list' });
+  const actCard = ui.card('AI activity', { flush: true, hint: 'live',
+    actions: h('a', { href: '#/activity', class: 'btn sm ghost' }, 'Open Live log →'),
+    body: h('div', null, strip, h('div', { class: 'act-scroll compact' }, actList)) });
+  const addActs = (items, fresh) => {
+    tracker.ingest(items);
+    strip.tick();
+    actList.querySelector('.empty')?.remove();
+    for (const e of items) {
+      if (e.level === 'debug' || (e.stage === 'llm' && e.event === 'start')) continue;
+      const row = activityRow(e, { onDecision: openDecision, compact: true });
+      if (fresh) row.classList.add('new');
+      actList.prepend(row);
+    }
+    while (actList.children.length > 60) actList.lastChild.remove();
+    if (!actList.children.length) actList.replaceChildren(ui.empty('Quiet', 'Engine and AI steps appear here live.', 'bolt'));
+  };
+  // SSE items that arrive while the tail load is in flight are held, then only the newer ones are added.
+  const gate = new LoadGate();
+  const loadActs = async () => {
+    gate.begin();
+    let loaded = null;
+    try {
+      const d = await api.get('/api/logs' + qs({ file: 'activity', lines: 120 }), { background: true });
+      loaded = d.entries || [];
+      actList.replaceChildren();
+      tracker.calls.clear();
+      addActs(loaded, false);
+    } catch (err) { actList.replaceChildren(ui.errorBox(err)); }
+    const rest = gate.end(loaded || []);
+    if (rest.length) addActs(rest, true);
+  };
+
   root.append(h('div', { class: 'live-grid' },
     feedCard,
     chartCard,
-    h('div', { class: 'live-side grid' }, posCard, watchCard)));
+    h('div', { class: 'live-side grid' }, actCard, posCard, watchCard)));
 
   // ------------------------------------------------------------------ live wiring
   const chartSoon = debounce(() => loadChart(false), 1500);
+  t.track(on('sse:activity', (d) => { const items = d?.entries || []; if (!gate.hold(items)) addActs(items, true); }));
+  t.track(on('scope', () => { st.oldest = null; loadFeed(); }));
+  t.every(1000, () => strip.tick());
   t.track(on('sse:decision', (r) => {
+    if (!inScope(r)) return;
     counts[r.final_action] = (counts[r.final_action] || 0) + 1;
     feedList.querySelector('.empty')?.remove();
     feedList.prepend(feedRow(r, true));
@@ -199,7 +280,7 @@ export function mount(root, params) {
   paintHead(null);
   loadFeed();
   loadWatch();
+  loadActs();
   if (st.symbol) loadChart(true);
   return () => { t.clear(); chart.destroy(); };
 }
-

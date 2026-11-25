@@ -153,7 +153,7 @@ export function table(columns, rows, opts = {}) {
     })));
     const tbody = h('tbody');
     for (const r of data) {
-      const tr = h('tr', { class: opts.onRow ? 'click' : null, onclick: opts.onRow ? () => opts.onRow(r) : null });
+      const tr = h('tr', { class: [opts.onRow && 'click', opts.rowClass && opts.rowClass(r)], onclick: opts.onRow ? () => opts.onRow(r) : null });
       for (const c of columns) {
         const v = c.fmt ? c.fmt(r) : r[c.key];
         tr.appendChild(h('td', { class: [c.num && 'num', c.wrap && 'wrap', c.cls && (typeof c.cls === 'function' ? c.cls(r) : c.cls)] },
@@ -180,16 +180,48 @@ export function twoLine(main, sub) {
 }
 
 // ------------------------------------------------------------------ toasts
-export function toast(message, tone = 'info', { title = null, timeout = 5000 } = {}) {
+const MAX_TOASTS = 6;
+/** Show a toast. Returns a handle {update({message, tone, title, timeout, extra}), close()} (sticky when timeout=0).
+ * Sticky toasts (command tracking) are never evicted by the 6-toast limit; the oldest non-sticky one goes first. */
+export function toast(message, tone = 'info', { title = null, timeout = 5000, extra = null } = {}) {
   const root = document.getElementById('toasts');
-  if (!root) return;
-  const el = h('div', { class: ['toast', tone], role: tone === 'bad' ? 'alert' : 'status' },
-    icon(tone === 'good' ? 'check' : tone === 'bad' || tone === 'warn' ? 'alert' : 'info', 16),
-    h('div', { class: 'grow' }, title ? h('div', { class: 'tt' }, title) : null, h('div', null, message)),
-    h('button', { class: 'x', 'aria-label': 'Dismiss', onclick: () => el.remove() }, '×'));
-  root.appendChild(el);
-  while (root.children.length > 5) root.firstChild.remove();
-  if (timeout) setTimeout(() => el.remove(), timeout);
+  if (!root) return { update() {}, close() {} };
+  const iconFor = (t) => icon(t === 'good' ? 'check' : t === 'bad' || t === 'warn' ? 'alert' : 'info', 16);
+  const titleEl = h('div', { class: 'tt' });
+  const msgEl = h('div');
+  const extraEl = h('div', { class: 'toast-x' });
+  const ic = h('span');
+  let dismissed = false;
+  let timer = null;
+  const el = h('div', { role: 'status' }, ic, h('div', { class: 'grow' }, titleEl, msgEl, extraEl),
+    h('button', { class: 'x', 'aria-label': 'Dismiss', onclick: () => { dismissed = true; clearTimeout(timer); el.remove(); } }, '×'));
+  const handle = {
+    update({ message: m = null, tone: t = null, title: tt, timeout: to = null, extra: ex } = {}) {
+      if (t) { el.className = `toast ${t}`; el.setAttribute('role', t === 'bad' ? 'alert' : 'status'); ic.replaceChildren(iconFor(t)); }
+      if (m !== null) msgEl.textContent = m;
+      if (tt !== undefined) { titleEl.textContent = tt || ''; titleEl.hidden = !tt; }
+      if (ex !== undefined) { extraEl.replaceChildren(ex || null); extraEl.hidden = !ex; }
+      if (to !== null) {
+        clearTimeout(timer);
+        el.dataset.sticky = to ? '' : '1';
+        if (to) timer = setTimeout(() => { dismissed = true; el.remove(); }, to);
+      }
+      // evicted by the toast limit (not dismissed by the owner): bring it back so the result is seen
+      if (!dismissed && !el.isConnected) attach();
+    },
+    close() { dismissed = true; clearTimeout(timer); el.remove(); },
+  };
+  const attach = () => {
+    root.appendChild(el);
+    while (root.children.length > MAX_TOASTS) {
+      const victim = Array.from(root.children).find((c) => c !== el && c.dataset.sticky !== '1');
+      if (!victim) break;
+      victim.remove();
+    }
+  };
+  handle.update({ message, tone, title, timeout, extra: extra || null });
+  if (!el.isConnected) attach();
+  return handle;
 }
 
 // ------------------------------------------------------------------ modal (typed confirmation)
@@ -248,29 +280,59 @@ export async function busy(btn, fn) {
   try { return await fn(); } finally { clear(btn); append(btn, old); btn.disabled = false; }
 }
 
-/** Poll /api/commands/{id} until the engine finishes it, then toast the outcome. */
-export async function trackCommand(cmd, label, { onDone = null, timeoutMs = 90000 } = {}) {
+/** Poll /api/commands/{id} until the engine finishes it, keeping one sticky toast updated
+ * ("waiting" -> "running… 42s") and ending with the engine's result message.
+ * Only time spent PENDING counts toward `pendingTimeoutMs` (is the engine running?); once the engine has
+ * picked the command up (RUNNING) it is followed for up to `runningTimeoutMs` (SWING evening scans can
+ * take 15-20 min). `resultExtra(st)` may return a node (e.g. "Add to follow-up" buttons) for the final toast. */
+export async function trackCommand(cmd, label, { onDone = null, pendingTimeoutMs = 300000, runningTimeoutMs = 3600000,
+  resultExtra = null } = {}) {
   const id = cmd?.command_id;
   if (!id) return null;
-  toast(`${label} sent to the engine (command #${id}). Waiting for it to run…`, 'info', { timeout: 3500 });
+  const t = toast(`Sent to the engine (command #${id}). Waiting for it to pick it up…`, 'info', { title: label, timeout: 0 });
   const t0 = Date.now();
-  let delay = 1200;
-  while (Date.now() - t0 < timeoutMs) {
+  let delay = 1000;
+  let started = null;
+  let pendingMs = 0;
+  let last = Date.now();
+  let lastStatus = 'PENDING';
+  for (;;) {
     await new Promise((r) => setTimeout(r, delay));
-    delay = Math.min(delay * 1.3, 4000);
-    let st;
-    try { st = await api.get(`/api/commands/${id}`, { background: true }); } catch { continue; }
-    if (st.finished) {
-      if (st.ok) toast(st.message || 'Done.', 'good', { title: `${label}: done` });
-      else if (st.rule) toast(`${st.message || ''}`, 'bad', { title: `${label}: blocked by rule ${st.rule}`, timeout: 9000 });
-      else toast(st.message || st.status, 'bad', { title: `${label}: ${st.status}`, timeout: 9000 });
+    const now = Date.now();
+    if (lastStatus !== 'RUNNING') pendingMs += now - last;
+    last = now;
+    delay = Math.min(delay * 1.25, started ? 5000 : 3000);
+    let st = null;
+    try { st = await api.get(`/api/commands/${id}`, { background: true }); } catch { st = null; }
+    if (st?.finished) {
+      const ok = st.ok === true;
+      const title = st.rule ? `${label}: blocked by rule ${st.rule}` : `${label}: ${ok ? 'done' : st.status === 'DONE' ? 'finished' : st.status}`;
+      let extra = null;
+      try { extra = resultExtra ? resultExtra(st) : null; } catch { extra = null; }
+      t.update({ message: st.message || (ok ? 'Done.' : st.status), tone: ok ? 'good' : (st.status === 'FAILED' ? 'bad' : 'warn'),
+        title, timeout: extra ? 30000 : (ok ? 9000 : 14000), extra });
       if (onDone) onDone(st);
       return st;
     }
+    if (st) lastStatus = st.status;
+    if (lastStatus === 'RUNNING') {
+      started = started || now;
+      const runFor = now - started;
+      if (runFor >= runningTimeoutMs) {
+        t.update({ message: `Still running after ${f.ago(runFor / 1000)} - follow it on the Live log / Settings > Recent commands.`,
+          tone: 'info', title: `${label}: still running`, timeout: 20000 });
+        return null;
+      }
+      t.update({ message: `running… ${f.ago(runFor / 1000)} - follow it on the Live log page.`, tone: 'info' });
+    } else {
+      if (pendingMs >= pendingTimeoutMs) {
+        t.update({ message: `Still waiting after ${f.ago(pendingMs / 1000)}. Is the engine running? The result will show in Settings > Recent commands.`,
+          tone: 'warn', title: `${label}: still pending`, timeout: 15000 });
+        return null;
+      }
+      t.update({ message: `queued (#${id}), waiting for the engine… ${Math.round((now - t0) / 1000)}s` });
+    }
   }
-  toast('The engine has not picked it up yet. Is the engine running? It will run when the engine starts.', 'warn',
-    { title: `${label}: still pending`, timeout: 9000 });
-  return null;
 }
 
 export async function sendCommand(btn, label, fn, opts = {}) {

@@ -15,7 +15,7 @@ from storage.models import ApprovalItem, ControlCommand, Position
 from webui import queries as q
 from webui.deps import enqueue, get_ctx, get_user, validation_message
 from webui.security import COOKIE_NAME, cookie_header
-from webui.util import NotAvailable, clean_symbol, day_bounds, iso, optional_attr, r2
+from webui.util import clean_symbol, day_bounds, iso, r2
 
 router = APIRouter(prefix="/api")
 
@@ -148,17 +148,10 @@ def autonomy_view(ctx: Any, settings: Any) -> dict[str, Any]:
 
 
 def overall_view(ctx: Any, unrealized_by_batch: dict[int, float]) -> dict[str, Any]:
+    from webui.scope import funding_or_fallback
+
     with ctx.session() as s:
-        try:
-            summary = optional_attr("capital.funding", "funding_summary")(s)
-            source = "funding"
-        except NotAvailable:
-            summary = q.batches_fallback(s, unrealized_by_batch)
-            source = "fallback"
-        except Exception as exc:  # noqa: BLE001 - never break the overview
-            logger.warning(f"[webui] funding_summary failed: {exc}")
-            summary = q.batches_fallback(s, unrealized_by_batch)
-            source = "fallback"
+        summary, source = funding_or_fallback(s, unrealized_by_batch)
     keys = ("total_deposited", "total_withdrawn", "net_invested", "current_capital", "overall_pnl", "overall_pnl_pct")
     return {"source": source} | {k: r2(summary.get(k)) for k in keys}
 
@@ -206,7 +199,7 @@ def overview(request: Request) -> dict[str, Any]:
 
 
 class ControlBody(BaseModel):
-    action: Literal["pause", "resume", "kill_switch", "analyze_now", "close_position"]
+    action: Literal["pause", "resume", "kill_switch", "analyze_now", "scan_now", "close_position"]
     confirm_text: str | None = Field(default=None, max_length=120)
     symbol: str | None = Field(default=None, max_length=32)
     mode: str | None = Field(default=None, max_length=16)
@@ -215,6 +208,7 @@ class ControlBody(BaseModel):
     qty: int | None = Field(default=None, ge=1)
     reason: str | None = Field(default=None, max_length=300)
     exit_cnc: bool = False
+    use_llm: bool = True
 
 
 @router.post("/control")
@@ -236,6 +230,14 @@ def control(body: ControlBody, request: Request) -> dict[str, Any]:
         if mode not in {m.value for m in Mode}:
             raise HTTPException(status_code=422, detail=f"invalid mode {body.mode!r}")
         return enqueue(ctx, user, CommandType.ANALYZE_NOW, {"symbol": symbol, "mode": mode, "route": bool(body.route)})
+    if body.action == "scan_now":
+        scan = getattr(CommandType, "SCAN_NOW", None)
+        if scan is None:  # engine side not deployed yet
+            raise HTTPException(status_code=501, detail="Scan now is not available yet (engine update pending).")
+        mode = (body.mode or "INTRADAY").upper()
+        if mode not in {m.value for m in Mode}:
+            raise HTTPException(status_code=422, detail=f"invalid mode {body.mode!r}")
+        return enqueue(ctx, user, scan, {"mode": mode, "use_llm": bool(body.use_llm)})
     # close_position
     if body.position_id is None:
         raise HTTPException(status_code=422, detail="position_id is required")

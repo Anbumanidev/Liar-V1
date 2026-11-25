@@ -14,3 +14,9 @@ ranking_refresh_minutes: 15
 market_context_cache_minutes: 5
 max_llm_candidates_per_cycle: 2   # only the best 2 setups of a cycle (by confluence) go to the LLM agents
 cycle_llm_budget_seconds: 240     # stop starting LLM analyses after 4 min so a 5-min cycle never overlaps
+# End-of-day plan for the next session + follow-up lists (a paper plan; every trade still needs the risk manager)
+next_day_plan_enabled: true      # 15:40: rank tomorrow's INTRADAY candidates -> NEXT_DAY list + EOD e-mail section
+next_day_universe: NIFTY100      # NIFTY50 | NIFTY100 | NIFTY200 | FNO | CUSTOM (universe.custom_symbols)
+next_day_max_candidates: 10      # at most this many stocks in the plan
+next_day_min_score: 55           # 0-100 deterministic score (strategies/next_day.py)
+followup_priority: true          # INTRADAY cycles analyse today's plan + 'use for trading' lists first

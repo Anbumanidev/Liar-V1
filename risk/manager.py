@@ -469,6 +469,26 @@ class RiskManager:
             c.add(RiskRule.NO_ROOM, p.room_r + _EPS >= r.min_room_r,
                   f"nearest opposing level only {p.room_r:.2f}R away (min {r.min_room_r:g}R): target unlikely")
         # Same symbol stopped out recently (BEL re-entered 13 minutes after its stop).
+        # Price behaviour: no buying the top / selling the bottom of an exhausted day range (2026-11-25:
+        # ITC at 86 % of a 168 %-of-ADR range; BEL at 72 % of a 112 % range, under the previous day high).
+        if r.behaviour_check_enabled and p.range_pos is not None and p.range_vs_adr is not None:
+            pos = p.range_pos if long_ else 1.0 - p.range_pos           # 1 = at the extreme we would chase
+            ext = (p.vwap_ext_atr or 0.0) * (1.0 if long_ else -1.0)
+            exhausted = p.range_vs_adr + _EPS >= r.exhausted_range_adr
+            chasing = ((pos + _EPS >= r.max_range_pos_long and (exhausted or ext + _EPS >= r.max_vwap_ext_atr))
+                       or (exhausted and pos + _EPS >= r.exhausted_max_range_pos))
+            side = "top" if long_ else "bottom"
+            c.add(RiskRule.CHASING_HIGH, not chasing,
+                  f"{'buying' if long_ else 'selling'} at {pos * 100:.0f}% toward the {side} of today's range after "
+                  f"the stock already moved {p.range_vs_adr * 100:.0f}% of its normal daily range"
+                  + (f", {abs(p.vwap_ext_atr):.1f} ATR from VWAP" if p.vwap_ext_atr is not None else "")
+                  + f" (limits: {r.max_range_pos_long * 100:.0f}% when stretched, "
+                    f"{r.exhausted_max_range_pos * 100:.0f}% on an exhausted day)")
+            if (p.continuation_rate is not None and (p.behaviour_samples or 0) >= r.behaviour_min_samples
+                    and pos >= 0.7):
+                c.add(RiskRule.HISTORY_FADES, p.continuation_rate + _EPS >= r.min_continuation_rate,
+                      f"in {p.behaviour_samples} recent sessions only {p.continuation_rate * 100:.0f}% of this stock's "
+                      f"moves from the {side} of the range continued (min {r.min_continuation_rate * 100:.0f}%)")
         cool = mcfg.reentry_cooldown_minutes
         last = state.last_sl_exit.get(f"{p.symbol}:{mode.value}")
         if cool and last is not None:

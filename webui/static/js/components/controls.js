@@ -4,6 +4,7 @@ import { api } from '../api.js';
 import { h, icon } from '../dom.js';
 import * as ui from '../ui.js';
 import { loadOverview } from '../store.js';
+import { followUpExtra } from './followup.js';
 
 const ORDER = ['HUMAN_IN_THE_LOOP', 'HYBRID', 'FULL_AUTO', 'SIGNALS_ONLY', 'PER_MODE'];
 const SHORT = { HUMAN_IN_THE_LOOP: 'Human', HYBRID: 'Hybrid', FULL_AUTO: 'Full auto', SIGNALS_ONLY: 'Signals', PER_MODE: 'Per mode' };
@@ -92,4 +93,21 @@ export function closePositionButton(p, { onDone = null } = {}) {
     ui.sendCommand(btn, `Close ${p.symbol}`, () => api.post('/api/control', { action: 'close_position', position_id: p.id }), { onDone });
   });
   return btn;
+}
+
+/** "Scan now (analysis only)" with a mode picker: screens the mode's watchlist now and sends the best
+ * setups to the AI. Never trades. Progress shows on the Live log; the result message comes back as a toast. */
+export function scanNowControls({ compact = false, modeSelect = null } = {}) {
+  const modeSel = modeSelect || h('select', { class: 'input sm', 'aria-label': 'Mode to scan', style: { width: '118px' } },
+    ['INTRADAY', 'BTST', 'SWING', 'POSITIONAL'].map((m) => h('option', { value: m }, m)));
+  const ai = h('input', { type: 'checkbox', checked: true });
+  const btn = h('button', { class: 'btn sm primary', title: 'Screen the watchlist now and run the AI on the best setups. Analysis only - never trades.' },
+    icon('search', 13), compact ? 'Scan now' : 'Scan now (analysis only)');
+  btn.addEventListener('click', () => {
+    const mode = modeSel.value;
+    ui.sendCommand(btn, `Scan ${mode}`, () => api.post('/api/control', { action: 'scan_now', mode, use_llm: ai.checked }),
+      { resultExtra: (st) => followUpExtra(st, { mode }) });
+  });
+  return h('div', { class: 'row nowrap' }, modeSelect ? null : modeSel,
+    h('label', { class: 'toggle', title: 'Send the best setups to the AI agents (slower)' }, ai, 'AI'), btn);
 }

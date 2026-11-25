@@ -11,7 +11,7 @@ from collections.abc import Iterable, Sequence
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import or_, func, select
 from sqlalchemy.orm import Session
 
 from core.clock import to_ist
@@ -212,10 +212,18 @@ def position_row(p: Position, quote: Any = None) -> dict[str, Any]:
     }
 
 
+def live_batches(column: Any) -> Any:
+    """SQL filter: rows of non-deleted batches (or with no batch). Used when no batch_id is given so the
+    Overall scope matches capital.funding.funding_summary, which skips soft-deleted batches."""
+    return or_(column.is_(None), column.not_in(select(Batch.id).where(Batch.deleted.is_(True))))
+
+
 def open_positions(session: Session, batch_id: int | None = None) -> list[Position]:
     stmt = select(Position).where(Position.status == PositionStatus.OPEN.value)
     if batch_id is not None:
         stmt = stmt.where(Position.batch_id == batch_id)
+    else:
+        stmt = stmt.where(live_batches(Position.batch_id))
     return list(session.execute(stmt.order_by(Position.opened_at.asc(), Position.id.asc())).scalars())
 
 
@@ -328,6 +336,8 @@ def trades_between(session: Session, lo: datetime | None, hi: datetime | None, *
         stmt = stmt.where(Trade.exit_time < hi)
     if batch_id is not None:
         stmt = stmt.where(Trade.batch_id == batch_id)
+    else:
+        stmt = stmt.where(live_batches(Trade.batch_id))
     if mode:
         stmt = stmt.where(Trade.mode == mode)
     if symbol:
@@ -430,8 +440,13 @@ _FEED_COLUMNS = (
 
 def decision_feed(session: Session, *, since_id: int | None = None, before_id: int | None = None, limit: int = 100,
                   action: str | None = None, symbol: str | None = None, hide_filtered: bool = False,
-                  lo: datetime | None = None, hi: datetime | None = None) -> list[dict[str, Any]]:
+                  lo: datetime | None = None, hi: datetime | None = None, batch_id: int | None = None
+                  ) -> list[dict[str, Any]]:
     stmt = select(*_FEED_COLUMNS)
+    if batch_id is not None:
+        stmt = stmt.where(DecisionRow.batch_id == batch_id)
+    else:
+        stmt = stmt.where(live_batches(DecisionRow.batch_id))
     if since_id is not None:
         stmt = stmt.where(DecisionRow.id > since_id)
     if before_id is not None:
@@ -519,6 +534,45 @@ def risk_view(risk: dict[str, Any] | None) -> dict[str, Any] | None:
             "failed": [c for c in checks if not c["passed"]]}
 
 
+_BEHAVIOUR_KEYS = ("range_pos", "range_vs_adr", "vwap", "vwap_ext_atr", "day_high", "day_low", "day_open", "adr",
+                   "atr", "pdh", "pdl", "pdc", "gap_pct", "continuation_rate")
+_BEHAVIOUR_TOP = {"range_pos": "range_pos", "range_vs_adr": "range_vs_adr", "vwap_ext_atr": "vwap_ext_atr",
+                  "continuation_rate": "continuation_rate", "behaviour_samples": "samples"}
+BEHAVIOUR_VERDICTS = ("OK", "CHASING", "FADES")
+
+
+def behaviour_view(context: dict[str, Any] | None, entry: float | None = None) -> dict[str, Any] | None:
+    """Deterministic price-behaviour snapshot of a decision (``context_json["proposal"]["behaviour"]``).
+
+    None for older decisions without it. Numbers are rounded; notes are plain, truncated strings.
+    """
+    if not isinstance(context, dict):
+        return None
+    prop = context.get("proposal")
+    if not isinstance(prop, dict):
+        return None
+    beh = prop.get("behaviour") if isinstance(prop.get("behaviour"), dict) else {}
+    out: dict[str, Any] = {k: r4(beh.get(k)) for k in _BEHAVIOUR_KEYS}
+    for src, dst in _BEHAVIOUR_TOP.items():
+        if out.get(dst) is None and prop.get(src) is not None:
+            out[dst] = r4(prop.get(src))
+    samples = beh.get("samples", out.get("samples"))
+    try:
+        out["samples"] = int(samples) if samples is not None else None
+    except (TypeError, ValueError):
+        out["samples"] = None
+    if not any(v is not None for v in out.values()):
+        return None
+    verdict = str(beh.get("verdict") or "").upper()
+    out["verdict"] = verdict if verdict in BEHAVIOUR_VERDICTS else None
+    direction = str(beh.get("direction") or prop.get("direction") or "").upper()
+    out["direction"] = direction if direction in ("LONG", "SHORT") else None
+    out["notes"] = str_list(beh.get("notes"), 8, 300)
+    out["entry"] = r2(entry if entry is not None else prop.get("entry_price"))
+    out["ltp"] = r2(prop.get("ltp"))
+    return out
+
+
 def decision_detail(session: Session, decision_id: int) -> dict[str, Any] | None:
     d = session.get(DecisionRow, decision_id)
     if d is None:
@@ -580,6 +634,7 @@ def decision_detail(session: Session, decision_id: int) -> dict[str, Any] | None
                  "latency_ms": meta.get("latency_ms"), "error": text(meta.get("error"), 400),
                  "time_validity_minutes": meta.get("time_validity_minutes")} if meta else None,
         "risk": risk_view(d.risk_json),
+        "behaviour": behaviour_view(ctxj, d.entry_price),
         "orders": [order_row(o) for o in orders],
         "positions": [{"id": p.id, "status": p.status, "symbol": p.symbol} for p in positions],
         "approval": {"id": approval.id, "status": approval.status, "decided_by": approval.decided_by,
@@ -588,12 +643,18 @@ def decision_detail(session: Session, decision_id: int) -> dict[str, Any] | None
     }
 
 
-def decision_funnel(session: Session, lo: datetime, hi: datetime, batch_id: int | None = None) -> dict[str, Any]:
+def decision_funnel(session: Session, lo: datetime | None, hi: datetime | None, batch_id: int | None = None
+                    ) -> dict[str, Any]:
     stmt = select(DecisionRow.final_action, DecisionRow.risk_rule,
-                  DecisionRow.context_json["filtered_reason"].as_string().label("filtered_reason")
-                  ).where(DecisionRow.created_at >= lo, DecisionRow.created_at < hi)
+                  DecisionRow.context_json["filtered_reason"].as_string().label("filtered_reason"))
+    if lo is not None:
+        stmt = stmt.where(DecisionRow.created_at >= lo)
+    if hi is not None:
+        stmt = stmt.where(DecisionRow.created_at < hi)
     if batch_id is not None:
         stmt = stmt.where(DecisionRow.batch_id == batch_id)
+    else:
+        stmt = stmt.where(live_batches(DecisionRow.batch_id))
     counts: Counter[str] = Counter()
     rules: Counter[str] = Counter()
     filters: Counter[str] = Counter()
@@ -607,7 +668,11 @@ def decision_funnel(session: Session, lo: datetime, hi: datetime, batch_id: int 
     filtered_n = counts.get("FILTERED", 0)
     reached_ai = total - filtered_n
     trade_signal = reached_ai - counts.get("NO_TRADE", 0)
-    scan_stmt = select(func.count(StockAnalyzed.id)).where(StockAnalyzed.as_of >= lo, StockAnalyzed.as_of < hi)
+    scan_stmt = select(func.count(StockAnalyzed.id))
+    if lo is not None:
+        scan_stmt = scan_stmt.where(StockAnalyzed.as_of >= lo)
+    if hi is not None:
+        scan_stmt = scan_stmt.where(StockAnalyzed.as_of < hi)
     if batch_id is not None:
         scan_stmt = scan_stmt.where(StockAnalyzed.batch_id == batch_id)
     scanned = int(session.execute(scan_stmt).scalar_one() or 0)
@@ -1019,3 +1084,59 @@ def day_of(dt: datetime | None) -> date | None:
 
 def batch_status_closed(status: str) -> bool:
     return status in (BatchStatus.CLOSED.value, BatchStatus.CLOSING.value)
+
+
+def closed_position_ids(session: Session, *, lo: datetime | None = None, hi: datetime | None = None,
+                        batch_id: int | None = None, limit: int = 50) -> list[int]:
+    """Latest closed positions (newest exit first) in a scope - for aggregated post-mortems."""
+    stmt = select(Position.id).where(Position.status == PositionStatus.CLOSED.value, Position.closed_at.is_not(None))
+    if lo is not None:
+        stmt = stmt.where(Position.closed_at >= lo)
+    if hi is not None:
+        stmt = stmt.where(Position.closed_at < hi)
+    if batch_id is not None:
+        stmt = stmt.where(Position.batch_id == batch_id)
+    else:
+        stmt = stmt.where(live_batches(Position.batch_id))
+    return list(session.execute(stmt.order_by(Position.closed_at.desc(), Position.id.desc()).limit(limit)).scalars())
+
+
+def batches_brief(session: Session) -> list[dict[str, Any]]:
+    return [{"id": b.id, "name": b.name, "status": b.status, "starting_capital": r2(b.starting_capital),
+             "started_at": iso(b.started_at or b.created_at), "ended_at": iso(b.ended_at)}
+            for b in session.execute(select(Batch).where(Batch.deleted.is_(False)).order_by(Batch.id.desc())).scalars()]
+
+
+def overall_capital_curve(curves: dict[int, list[dict[str, Any]]], batches: list[dict[str, Any]]
+                          ) -> list[dict[str, Any]]:
+    """One line for ALL batches: money invested so far + every started batch's P&L at that moment.
+
+    value(t) = sum(top-ups of batches started by t) + sum(equity_b(t) - start_b). It ends at
+    funding_summary's current_capital and stays continuous across batch switches (the old batch's
+    equity is carried into the new one), unlike interleaving per-batch equity points.
+    """
+    info = {int(b["batch_id"]): b for b in batches if b.get("batch_id") is not None}
+    series = {bid: sorted(pts, key=lambda p: p["time"]) for bid, pts in curves.items() if pts and bid in info}
+    times = sorted({p["time"] for pts in series.values() for p in pts})
+    out: list[dict[str, Any]] = []
+    for t in times:
+        total, any_started = 0.0, False
+        for bid, pts in series.items():
+            if pts[0]["time"] > t:
+                continue
+            last = next(p for p in reversed(pts) if p["time"] <= t)
+            b = info[bid]
+            start = float(b.get("starting_capital") or 0.0)
+            total += float(b.get("top_up") or 0.0) + float(last["equity"] or 0.0) - start
+            any_started = True
+        if any_started:
+            src = next((p for pts in series.values() for p in pts if p["time"] == t), {})
+            out.append({"ts": src.get("ts"), "time": t, "equity": r2(total), "source": "OVERALL"})
+    return out
+
+
+def concat_curves(curves: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Merge several equity curves into one strictly time-ordered series (overall view)."""
+    pts = [p for c in curves for p in c]
+    pts.sort(key=lambda p: p["time"])
+    return _dedupe_times(pts)

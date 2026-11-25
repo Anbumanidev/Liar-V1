@@ -469,6 +469,52 @@ class CapitalAccount(Base):
     updated_at: Mapped[datetime] = mapped_column(ISTDateTime)
 
 
+class Watchlist(Base):
+    """A named list of stocks the owner follows (or the system's next-day plan).
+
+    kind: MANUAL (owner's follow-up lists) | NEXT_DAY (end-of-day plan for ``for_date``) | SYSTEM.
+    ``use_for_trading``: INTRADAY cycles analyse these symbols first (they still pass every risk rule).
+    Owner data, not trading state: the web dashboard writes it directly (audited), not via commands.
+    """
+
+    __tablename__ = "watchlists"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), unique=True)
+    kind: Mapped[str] = mapped_column(_str(), default="MANUAL", index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    use_for_trading: Mapped[bool] = mapped_column(Boolean, default=False)
+    for_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)   # NEXT_DAY plans
+    archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(ISTDateTime)
+    updated_at: Mapped[datetime] = mapped_column(ISTDateTime)
+    meta_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+
+class WatchlistItem(Base):
+    """One stock in a watchlist, with an optional plan (levels) and its latest analysis."""
+
+    __tablename__ = "watchlist_items"
+    __table_args__ = (UniqueConstraint("watchlist_id", "symbol", name="uq_watchlist_symbol"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    watchlist_id: Mapped[int] = mapped_column(Integer, index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    mode: Mapped[str | None] = mapped_column(_str(), nullable=True)
+    source: Mapped[str] = mapped_column(_str(), default="MANUAL")     # MANUAL | ANALYSIS | SCAN | EOD_PLAN
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    added_at: Mapped[datetime] = mapped_column(ISTDateTime)
+    added_by: Mapped[str] = mapped_column(String(64), default="owner")
+    added_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    plan_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)  # setup, trigger, stop, target, score, reasons
+    status: Mapped[str] = mapped_column(_str(), default="ACTIVE")    # ACTIVE | TRIGGERED | INVALIDATED
+    status_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)        # analysis it was added from
+    last_analysis_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_analysis_at: Mapped[datetime | None] = mapped_column(ISTDateTime, nullable=True)
+    last_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class FundingEvent(Base):
     """Owner money in / out when a batch starts (the "how much to add to get back to 1000" record).
 

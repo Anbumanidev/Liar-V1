@@ -8,6 +8,8 @@ import { go, pageTimers } from '../router.js';
 import { LineChart } from '../charts.js';
 import { registerChart } from '../theme.js';
 import { tradeColumns } from './today.js';
+import { getScope, setScope } from '../scope.js';
+import { on } from '../api.js';
 
 export const title = (p) => (p?.id ? `Batch #${p.id}` : 'Batches & capital');
 
@@ -49,7 +51,9 @@ function mountList(root) {
       { key: 'trades', label: 'Trades', num: true },
       { key: 'win_rate', label: 'Win rate', num: true, fmt: (b) => (f.isNum(b.win_rate) ? `${f.num(b.win_rate, 1)}%` : '–') },
       { key: 'started_at', label: 'Period', fmt: (b) => ui.twoLine(f.date(b.started_at), b.ended_at ? `→ ${f.date(b.ended_at)}` : '→ now') },
-    ], rows, { onRow: (b) => go(`/batches/${b.batch_id}`), initialSort: null, empty: ui.empty('No batches yet', 'The engine creates Batch 1 on first start.') }));
+    ], rows, { onRow: (b) => go(`/batches/${b.batch_id}`), initialSort: null,
+      rowClass: (b) => (getScope().kind === 'batch' && getScope().batch_id === b.batch_id ? 'selected' : null),
+      empty: ui.empty('No batches yet', 'The engine creates Batch 1 on first start.') }));
     eventsCard.body.replaceChildren(ui.table([
       { key: 'ts', label: 'When', fmt: (e) => f.date(e.ts) },
       { key: 'kind', label: 'Type', fmt: (e) => ui.badge(e.kind.replace('_', ' '), e.kind === 'WITHDRAW' ? 'bad' : e.kind === 'TOP_UP' ? 'good' : 'info') },
@@ -60,6 +64,7 @@ function mountList(root) {
     if (!formBuilt) { newCard.body.replaceChildren(newBatchForm(d, load)); formBuilt = true; }
   };
   load();
+  t.track(on('scope', load));
   const onRefresh = () => load();
   window.addEventListener('page:refresh', onRefresh);
   t.track(() => window.removeEventListener('page:refresh', onRefresh));
@@ -154,7 +159,10 @@ function mountDetail(root, id) {
     try { d = await api.get(`/api/batches/${id}`); } catch (err) { kpis.replaceChildren(ui.errorBox(err)); return; }
     const b = d.batch; const c = d.capital || {}; const tt = d.totals;
     head.replaceChildren(h('a', { href: '#/batches', class: 'btn sm ghost' }, icon('arrowLeft', 14), 'Batches'), h('h1', null, b.name),
-      ui.badge(b.status, b.status === 'ACTIVE' ? 'good' : ''), h('span', { class: 'sub' }, `${f.date(b.started_at)} → ${b.ended_at ? f.date(b.ended_at) : 'now'}`));
+      ui.badge(b.status, b.status === 'ACTIVE' ? 'good' : ''), h('span', { class: 'sub' }, `${f.date(b.started_at)} → ${b.ended_at ? f.date(b.ended_at) : 'now'}`),
+      h('span', { class: 'grow' }),
+      h('button', { class: 'btn sm primary', title: 'Set the global scope to this batch and open its results',
+        onclick: () => { setScope({ kind: 'batch', batch_id: b.id }); go('/results'); } }, 'Show results for this batch'));
     kpis.replaceChildren(
       ui.kpi({ label: 'Starting capital', value: f.inr(c.starting_capital ?? b.starting_capital),
         sub: d.funding && f.isNum(d.funding.top_up) ? `top-up ${f.inr(d.funding.top_up, { sign: true })}` : null }),

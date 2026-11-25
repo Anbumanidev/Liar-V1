@@ -24,8 +24,9 @@ class Slot:
 #: Job names (also accepted by the RUN_JOB command).
 JOBS: tuple[str, ...] = (
     "premarket", "watchlist", "preopen_check", "intraday_cycle", "btst_scan", "squareoff",
-    "cnc_time_stop", "eod", "eod_report", "swing_scan",
+    "cnc_time_stop", "eod", "eod_report", "swing_scan", "next_day_plan", "opening_check",
 )
+JOB_NAMES = JOBS
 
 
 def _range(start: str, end: str, step_min: int) -> list[time]:
@@ -57,6 +58,10 @@ class DailyPlan:
             Slot(parse_hhmm(sc.eod_report), "eod_report"),
             Slot(parse_hhmm(sc.swing_scan), "swing_scan"),
         ]
+        if self.settings.engine.next_day_plan_enabled:
+            # 15:40 rank tomorrow's INTRADAY candidates (before the 15:45 e-mail); 09:20 re-check them
+            out += [Slot(parse_hhmm(sc.next_day_plan), "next_day_plan"),
+                    Slot(parse_hhmm(sc.opening_check), "opening_check")]
         out += [Slot(t, "intraday_cycle") for t in _range(sc.intraday_cycle_start, sc.intraday_cycle_end,
                                                            sc.intraday_cycle_minutes)]
         out += [Slot(t, "btst_scan") for t in _range(sc.btst_scan_window.start, sc.btst_scan_window.end,

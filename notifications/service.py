@@ -1034,6 +1034,19 @@ def normalize_eod_report(report: Mapping[str, Any]) -> dict[str, Any]:
     r.setdefault("open_unrealized_total", 0.0)
     r.setdefault("not_traded_total", len(r["not_traded"]))
     r.setdefault("empty", False)
+    if r.get("next_day_plan"):   # optional section (scheduler.jobs.job_eod_report); absent = not shown
+        plan_rows = []
+        for p in r["next_day_plan"]:
+            row = dict(p or {})
+            for k in ("symbol", "setup", "direction", "trigger", "stop", "target", "rr", "score", "status"):
+                row.setdefault(k, None)
+            row["reasons"] = list(row.get("reasons") or [])
+            row["affordable"] = bool(row.get("affordable", True))
+            plan_rows.append(row)
+        r["next_day_plan"] = plan_rows
+        r.setdefault("next_day_plan_for", None)
+        r.setdefault("next_day_plan_name", None)
+        r.setdefault("next_day_plan_check", "09:20")
     return r
 
 

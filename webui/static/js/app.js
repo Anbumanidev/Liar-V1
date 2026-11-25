@@ -1,13 +1,14 @@
 // App bootstrap: theme, auth (login screen / setup instructions), shell (sidebar + status bar),
 // one shared SSE stream, hash router and keyboard shortcuts.
 import { api, on, setCsrf, ApiError } from './api.js';
-import { h, icon, clear } from './dom.js';
+import { h, icon } from './dom.js';
 import * as f from './format.js';
 import * as sse from './sse.js';
 import { startRouter, go, parse } from './router.js';
 import { store, loadOverview, refreshOverviewSoon } from './store.js';
 import * as ui from './ui.js';
 import { applyThemeToCharts } from './theme.js';
+import { getScope, setScope, loadScopeOptions, scopeOptions } from './scope.js';
 
 const app = document.getElementById('app');
 let stopRouter = null;
@@ -75,7 +76,9 @@ function renderLogin({ notice = null, setup = false } = {}) {
 const NAV = [
   { key: 'home', label: 'Home', icon: 'home', href: '#/home', kbd: 'g h' },
   { key: 'live', label: 'Live', icon: 'live', href: '#/live', kbd: 'g l' },
-  { key: 'today', label: 'Today', icon: 'today', href: '#/today', kbd: 'g t' },
+  { key: 'activity', label: 'Live log', icon: 'bolt', href: '#/activity', kbd: 'g a' },
+  { key: 'watchlists', label: 'Follow-up', icon: 'list', href: '#/watchlists', kbd: 'g f' },
+  { key: 'results', label: 'Results', icon: 'today', href: '#/results', kbd: 'g r' },
   { key: 'trades', label: 'Trades journal', icon: 'trades', href: '#/trades', kbd: 'g j' },
   { key: 'batches', label: 'Batches & capital', icon: 'batches', href: '#/batches', kbd: 'g b' },
   { sep: 'System' },
@@ -124,8 +127,58 @@ function renderShell() {
   const topbar = h('header', { class: 'topbar' }, menuBtn, title, h('div', { class: 'spacer' }),
     h('div', { class: 'status-group' }, enginePill, marketPill, clock, autonomy, streamPill), bell, themeBtn, logoutBtn);
   const content = h('main', { class: 'content', id: 'content' });
-  app.replaceChildren(sidebar, scrim, h('div', { class: 'main' }, topbar, content));
-  Object.assign(shell, { sidebar, scrim, navLinks, title, enginePill, marketPill, clock, autonomy, streamPill, bellCount, homeCount, content });
+  const scopeBar = buildScopeBar();
+  app.replaceChildren(sidebar, scrim, h('div', { class: 'main' }, topbar, scopeBar, content));
+  Object.assign(shell, { sidebar, scrim, navLinks, title, enginePill, marketPill, clock, autonomy, streamPill, bellCount, homeCount, content,
+    scopeBar });
+}
+
+// ------------------------------------------------------------------ scope bar (Today | Batch | Overall) + engine activity
+let scopeBarOffs = [];
+function buildScopeBar() {
+  scopeBarOffs.forEach((off) => off());
+  scopeBarOffs = [];
+  const seg = h('div', { class: 'seg sm', role: 'radiogroup', 'aria-label': 'Show results for' });
+  const dateIn = h('input', { type: 'date', class: 'input sm', 'aria-label': 'Day', max: f.todayIST() });
+  const prev = h('button', { class: 'btn sm ghost', title: 'Previous day', 'aria-label': 'Previous day' }, icon('chevronLeft', 14));
+  const next = h('button', { class: 'btn sm ghost', title: 'Next day', 'aria-label': 'Next day' }, icon('chevronRight', 14));
+  const batchSel = h('select', { class: 'input sm', 'aria-label': 'Batch' });
+  const dayBox = h('div', { class: 'row nowrap' }, prev, dateIn, next);
+  const activity = h('span', { class: 'act-text ellipsis', title: 'What the engine is doing (engine status)' }, '');
+  const countdown = h('span', { class: 'mono countdown' }, '');
+  const render = () => {
+    const sc = getScope();
+    seg.replaceChildren(...[['today', 'Today'], ['batch', 'Batch'], ['all', 'Overall']].map(([v, l]) => h('button', {
+      type: 'button', class: sc.kind === v ? 'on' : null, role: 'radio', 'aria-checked': String(sc.kind === v),
+      title: v === 'today' ? 'One day (pick the date)' : v === 'batch' ? 'One batch (pick it)' : 'All batches together',
+      onclick: () => setScope({ kind: v }) }, l)));
+    dayBox.classList.toggle('hidden', sc.kind !== 'today');
+    batchSel.classList.toggle('hidden', sc.kind !== 'batch');
+    dateIn.value = sc.date;
+    dateIn.max = f.todayIST();
+    next.disabled = sc.date >= f.todayIST();
+    const opts = scopeOptions();
+    batchSel.replaceChildren(...(opts.batches || []).map((b) => h('option', { value: String(b.id), selected: b.id === sc.batch_id },
+      b.name + (b.status === 'ACTIVE' ? ' (active)' : ' (' + String(b.status).toLowerCase() + ')'))));
+  };
+  dateIn.addEventListener('change', () => { if (dateIn.value) setScope({ date: dateIn.value }); });
+  prev.addEventListener('click', () => setScope({ date: f.shiftDay(getScope().date, -1) }));
+  next.addEventListener('click', () => { const n = f.shiftDay(getScope().date, 1); if (n <= f.todayIST()) setScope({ date: n }); });
+  batchSel.addEventListener('change', () => setScope({ batch_id: Number(batchSel.value) }));
+  scopeBarOffs.push(on('scope', render), on('scope:options', render));
+  render();
+  const bar = h('div', { class: 'scopebar' },
+    h('span', { class: 'lbl hide-sm' }, 'Show results for'), seg, dayBox, batchSel, h('span', { class: 'spacer' }),
+    h('span', { class: 'engine-line', title: 'Engine status' }, icon('bolt', 13), activity, countdown));
+  bar.paintActivity = () => {
+    const e = status.engine;
+    activity.textContent = e ? (e.activity || (e.alive ? e.state : 'engine ' + e.label)) : '';
+    const nxt = e && e.next_cycle_at ? Date.parse(e.next_cycle_at) : null;
+    if (!nxt || !e.alive) { countdown.textContent = ''; return; }
+    const left = (nxt - f.nowMs()) / 1000;
+    countdown.textContent = left > 0 ? '· next cycle in ' + f.countdown(left) : '· next cycle due';
+  };
+  return bar;
 }
 
 function openSidebar() { shell.sidebar.classList.add('open'); shell.scrim.classList.remove('hidden'); }
@@ -214,9 +267,11 @@ async function boot() {
   });
   sse.start();
   loadOverview({ background: true }).catch(() => {});
+  loadScopeOptions();
   clockTimer = setInterval(() => {
     shell.clock.firstChild.textContent = f.istClock();
     paintEngine();
+    if (shell.scopeBar) shell.scopeBar.paintActivity();
   }, 1000);
   overviewTimer = setInterval(() => { if (!document.hidden) loadOverview().catch(() => {}); }, 30000);
 }
@@ -237,7 +292,9 @@ on('auth:required', (body) => {
   if (app.classList.contains('login-wrap')) return;
   renderLogin({ setup: !!body?.setup_required, notice: body?.detail && body.detail !== 'not authenticated' ? body.detail : 'Please log in again.' });
 });
+let lastBatchId = null;
 on('overview', (o) => {
+  if (o.batch && o.batch.id && o.batch.id !== lastBatchId) { if (lastBatchId !== null) loadScopeOptions(); lastBatchId = o.batch.id; }
   updateEngine(o.engine);
   updateMarket(o.market);
   updateAutonomy(o.autonomy);
@@ -261,7 +318,8 @@ on('stream:state', updateStream);
 on('net:down', () => updateStream('idle'));
 
 // ------------------------------------------------------------------ keyboard shortcuts
-const KEYMAP = { h: '/home', l: '/live', t: '/today', j: '/trades', b: '/batches', x: '/health', s: '/settings' };
+const KEYMAP = { h: '/home', l: '/live', a: '/activity', f: '/watchlists', r: '/results', t: '/results', j: '/trades', b: '/batches',
+  x: '/health', s: '/settings' };
 let gPending = 0;
 document.addEventListener('keydown', (e) => {
   if (!shell.content || app.classList.contains('login-wrap')) return;
@@ -282,7 +340,9 @@ document.addEventListener('keydown', (e) => {
 });
 
 export function showShortcuts() {
-  const rows = [['g h', 'Home'], ['g l', 'Live'], ['g t', 'Today'], ['g j', 'Trades journal'], ['g b', 'Batches'],
+  const rows = [['g h', 'Home'], ['g l', 'Live'], ['g a', 'Live log (AI activity)'], ['g f', 'Follow-up lists'], ['g r', 'Results'],
+    ['g j', 'Trades journal'],
+    ['g b', 'Batches'],
     ['g x', 'Health & logs'], ['g s', 'Settings'], ['/', 'Focus symbol search (Live)'], ['r', 'Refresh page data'],
     ['Esc', 'Close drawer / dialog'], ['?', 'This help']];
   ui.confirmModal({ title: 'Keyboard shortcuts', confirmLabel: 'Close',

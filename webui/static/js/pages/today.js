@@ -9,10 +9,13 @@ import { LineChart } from '../charts.js';
 import { registerChart } from '../theme.js';
 import { openDecision } from '../components/decision.js';
 import { positionCard } from '../components/positions.js';
+import { summaryBlock } from '../components/summary.js';
+import { followUpButton } from '../components/followup.js';
+import { getScope, setScope, scopeParams, scopeLabel } from '../scope.js';
 
-export const title = 'Today';
+export const title = 'Results';
 
-export function tradeColumns({ withDate = false, withBatch = false } = {}) {
+export function tradeColumns({ withDate = false, withBatch = false, followUp = false } = {}) {
   const tm = withDate ? f.dateTime : f.hm;
   return [
     withBatch ? { key: 'batch_id', label: 'Batch', fmt: (r) => `#${r.batch_id}` } : null,
@@ -31,73 +34,70 @@ export function tradeColumns({ withDate = false, withBatch = false } = {}) {
     { key: 'r_multiple', label: 'R', num: true, fmt: (r) => h('span', { class: f.tone(r.r_multiple) }, f.rmult(r.r_multiple)) },
     { key: 'holding_minutes', label: 'Duration', num: true, fmt: (r) => f.duration(r.holding_minutes) },
     { key: 'result', label: 'Result', fmt: (r) => ui.resultBadge(r.result) },
+    followUp ? { key: 'follow', label: '', sortable: false, title: 'Add the stock to a follow-up list',
+      fmt: (r) => followUpButton(r.symbol, { mode: r.mode, compact: true }) } : null,
   ].filter(Boolean);
 }
 
 export function mount(root, params) {
   const t = pageTimers();
-  let day = params.date || f.todayIST();
-  const dateInput = h('input', { type: 'date', class: 'input sm', value: day, max: f.todayIST(), 'aria-label': 'Day' });
-  const strip = h('div', { class: 'strip' }, ui.skeleton(2));
+  if (params.date && /^\d{4}-\d{2}-\d{2}$/.test(params.date)) setScope({ kind: 'today', date: params.date });
+  const summary = summaryBlock();
+  const scopeTag = h('span', { class: 'scope-tag' });
   const tradesCard = ui.card('Trade completed log', { hint: 'one row per trade (all exit legs combined) · click a row for the full story', flush: true, body: ui.skeleton(5) });
   const openCard = ui.card('Open positions', { body: ui.skeleton(2) });
   const funnelCard = ui.card('Decisions funnel', { hint: 'how many stocks made it through each stage', body: ui.skeleton(5) });
-  const pmCard = ui.card('What went wrong today', { hint: 'post-mortem · top issues and the fix', body: ui.skeleton(3) });
+  const pmCard = ui.card('What went wrong', { hint: 'post-mortem · top issues and the fix', body: ui.skeleton(3) });
   const tlCard = ui.card('Timeline', { hint: 'orders, exits, stop moves, risk rejections, approvals', body: ui.skeleton(6) });
   const eqBox = h('div', { class: 'chart-box small' });
-  const eqCard = ui.card('Equity through the day', { hint: 'realized (capital ledger)', flush: true, body: eqBox });
+  const eqCard = ui.card('Equity', { flush: true, body: eqBox });
   const eqChart = new LineChart(eqBox);
   t.track(registerChart(eqChart));
+  const dayNav = h('div', { class: 'row' });
 
-  const setDay = (d) => {
-    day = d;
-    dateInput.value = d;
-    history.replaceState(null, '', d === f.todayIST() ? '#/today' : `#/today?date=${d}`);
-    load(false);
-  };
-  dateInput.addEventListener('change', () => dateInput.value && setDay(dateInput.value));
   root.append(
-    h('div', { class: 'page-head' }, h('h1', null, 'Day report'),
-      h('div', { class: 'row' },
-        h('button', { class: 'btn sm', title: 'Previous day', onclick: () => setDay(f.shiftDay(day, -1)) }, icon('chevronLeft', 14)),
-        dateInput,
-        h('button', { class: 'btn sm', title: 'Next day', onclick: () => { const n = f.shiftDay(day, 1); if (n <= f.todayIST()) setDay(n); } }, icon('chevronRight', 14)),
-        h('button', { class: 'btn sm', onclick: () => setDay(f.todayIST()) }, 'Today')),
-      h('span', { class: 'grow' }), h('span', { class: 'sub', id: 'today-sub' }, '')),
-    strip, tradesCard,
+    h('div', { class: 'page-head' }, h('h1', null, 'Results'), scopeTag, dayNav, h('span', { class: 'grow' }), h('span', { class: 'sub', id: 'today-sub' }, '')),
+    summary, tradesCard,
     h('div', { class: 'grid cols-2' }, pmCard, funnelCard),
     h('div', { class: 'grid cols-2' }, h('div', { class: 'grid' }, openCard, eqCard), tlCard));
 
+  let seq = 0;
   const load = async (background = true) => {
+    const sc = getScope();
+    const my = ++seq;
+    scopeTag.replaceChildren('for ', h('b', null, scopeLabel()));
+    dayNav.replaceChildren(...(sc.kind === 'today' ? [
+      h('button', { class: 'btn sm', title: 'Previous day', onclick: () => setScope({ date: f.shiftDay(sc.date, -1) }) }, icon('chevronLeft', 14)),
+      h('button', { class: 'btn sm', title: 'Next day', disabled: sc.date >= f.todayIST(),
+        onclick: () => setScope({ date: f.shiftDay(sc.date, 1) }) }, icon('chevronRight', 14)),
+      sc.isLiveToday ? null : h('button', { class: 'btn sm', onclick: () => setScope({ date: f.todayIST() }) }, 'Today')] : []));
+    pmCard.head.querySelector('h2').textContent = sc.kind === 'today' ? (sc.isLiveToday ? 'What went wrong today' : 'What went wrong that day')
+      : 'What went wrong (latest 50 trades)';
+    eqCard.head?.querySelector('h2') && (eqCard.head.querySelector('h2').textContent = sc.kind === 'today' ? 'Equity through the day (realized)'
+      : sc.kind === 'batch' ? 'Batch equity curve' : 'Total capital across all batches');
+    tlCard.classList.toggle('hidden', sc.kind !== 'today');
+    const params = scopeParams();
+    api.get('/api/summary' + qs(params), { background }).then((d) => { if (my === seq) summary.render(d); })
+      .catch((err) => { if (my === seq) summary.fail(err); });
     let d;
     try {
-      d = await api.get('/api/today' + qs({ date: day }), { background });
+      d = await api.get('/api/results' + qs(params), { background });
     } catch (err) {
-      strip.replaceChildren(ui.errorBox(err, 'Could not load the day'));
+      if (my === seq) tradesCard.body.replaceChildren(ui.errorBox(err, 'Could not load the results'));
       return;
     }
+    if (my !== seq) return;
     const s = d.summary;
-    document.getElementById('today-sub').textContent = `${f.weekday(day + 'T12:00:00+05:30')} · updated ${f.time(d.server_time)} IST`;
-    const cell = (label, value, sub = null) => h('div', { class: 'cell' }, h('div', { class: 'label' }, label), h('div', { class: 'value' }, value),
-      sub ? h('div', { class: 'sub' }, sub) : null);
-    strip.replaceChildren(
-      cell('Net P&L (realized)', ui.money(s.net), `gross ${f.inr(s.gross, { sign: true })}`),
-      d.is_today ? cell('Unrealized now', ui.money(s.unrealized), `${s.open} open position(s)`) : null,
-      cell('Trades', String(s.closed), `${s.wins} won · ${s.losses} lost${s.flat ? ` · ${s.flat} flat` : ''}`),
-      cell('Win rate', f.isNum(s.win_rate) ? `${f.num(s.win_rate, 1)}%` : '–', f.isNum(s.avg_r) ? `avg ${f.rmult(s.avg_r)}` : null),
-      cell('Charges', f.inr(s.charges), 'brokerage, STT, GST, stamp…'),
-      cell('Best', s.best ? h('span', { class: 'pos' }, f.inr(s.best.net, { sign: true })) : '–', s.best?.symbol),
-      cell('Worst', s.worst ? h('span', { class: 'neg' }, f.inr(s.worst.net, { sign: true })) : '–', s.worst?.symbol));
-
+    document.getElementById('today-sub').textContent = `${sc.kind === 'today' ? f.weekday(sc.date + 'T12:00:00+05:30') + ' · ' : ''}updated ${f.time(d.server_time)} IST`;
     tradesCard.head.querySelector('h2').textContent = `Trade completed log (${d.trades.length})`;
     const tot = d.trades.length ? { symbol: 'Total', gross: ui.money(s.gross), charges: f.inr(s.charges), net: h('b', null, ui.money(s.net)),
       r_multiple: f.isNum(s.avg_r) ? `avg ${f.rmult(s.avg_r)}` : '' } : null;
-    tradesCard.body.replaceChildren(ui.table(tradeColumns(), d.trades, {
-      onRow: (r) => go(`/trade/${r.position_id}`), footer: tot, initialSort: { key: 'exit_time', dir: -1 },
-      empty: ui.empty(d.is_today ? 'No completed trades yet today' : 'No completed trades on this day',
+    tradesCard.body.replaceChildren(ui.table(tradeColumns({ withDate: sc.kind !== 'today', withBatch: sc.kind === 'all', followUp: true }), d.trades, {
+      onRow: (r) => go(`/trade/${r.position_id}`), footer: tot, initialSort: { key: 'exit_time', dir: -1 }, tall: sc.kind !== 'today',
+      empty: ui.empty(sc.kind === 'today' ? (d.is_today ? 'No completed trades yet today' : 'No completed trades on this day') : 'No completed trades in this scope',
         'Closed positions appear here with entry, exit, stop-loss, targets, charges and net P&L.', 'trades') }));
 
-    openCard.head.querySelector('h2').textContent = `${d.is_today ? 'Open positions' : 'Still open from this day'} (${d.open_positions.length})`;
+    openCard.head.querySelector('h2').textContent = `${sc.kind === 'today' && !d.is_today ? 'Still open from this day' : 'Open positions'} (${d.open_positions.length})`;
     openCard.body.replaceChildren(d.open_positions.length
       ? h('div', { class: 'pos-list' }, d.open_positions.map((p) => positionCard(p, { onClick: () => go(`/trade/${p.id}`) })))
       : ui.empty('No open positions', ''));
@@ -105,33 +105,36 @@ export function mount(root, params) {
     funnelCard.body.replaceChildren(renderFunnel(d.funnel));
     tlCard.body.replaceChildren(renderTimeline(d.timeline));
     eqChart.setData(d.equity);
-    loadPostmortem();
+    loadPostmortem(my, params);
   };
 
-  const loadPostmortem = async () => {
+  const loadPostmortem = async (my, params) => {
     try {
-      const pm = await api.get('/api/postmortem/day' + qs({ date: day }), { background: true });
-      pmCard.body.replaceChildren(renderIssues(pm));
+      const pm = await api.get('/api/postmortem' + qs(params), { background: true });
+      if (my === seq) pmCard.body.replaceChildren(renderIssues(pm));
     } catch (err) {
+      if (my !== seq) return;
       pmCard.body.replaceChildren(err.status === 501
         ? ui.notice('info', 'Post-mortem analysis is not available yet', 'Each losing trade will be diagnosed here (stop too tight, late entry, …) with the fix. Trade-level details already work: click a trade above.')
         : ui.errorBox(err, 'Post-mortem failed'));
     }
   };
 
-  const soon = debounce(() => { if (day === f.todayIST()) load(); }, 1500);
+  const live = () => { const sc = getScope(); return sc.kind !== 'today' || sc.isLiveToday; };
+  const soon = debounce(() => { if (live()) load(); }, 1500);
   t.track(on('sse:trade', soon));
   t.track(on('sse:order', soon));
+  t.track(on('scope', () => load(false)));
   const onRefresh = () => load(false);
   window.addEventListener('page:refresh', onRefresh);
   t.track(() => window.removeEventListener('page:refresh', onRefresh));
-  t.every(30000, () => { if (day === f.todayIST()) load(); });
+  t.every(30000, () => { if (live()) load(); });
   load(false);
   return () => { t.clear(); eqChart.destroy(); };
 }
 
 export function renderFunnel(fn) {
-  if (!fn || !fn.counts?.TOTAL) return ui.empty('No stocks analysed on this day', 'The funnel shows how many stocks passed each stage.', 'live');
+  if (!fn || !fn.counts?.TOTAL) return ui.empty('No stocks analysed in this scope', 'The funnel shows how many stocks passed each stage.', 'live');
   const max = Math.max(1, ...fn.stages.map((s) => s.count));
   const tone = { risk_rejected: 'bad', executed: 'good', queued: 'warn' };
   return h('div', { class: 'stack' },
@@ -151,10 +154,12 @@ export function renderIssues(pm) {
   const sm = pm?.summary || {};
   const head = h('div', { class: 'small muted' }, `${sm.trades ?? 0} trade(s) analysed · ${sm.wins ?? 0} won · ${sm.losses ?? 0} lost`,
     f.isNum(sm.net_pnl) ? h('span', null, ' · net ', h('b', { class: f.tone(sm.net_pnl) }, f.inr(sm.net_pnl, { sign: true }))) : null);
-  if (!issues.length) return h('div', { class: 'stack' }, head, ui.notice('good', 'No recurring problems found', 'Nothing systematic went wrong on this day.'));
+  if (!issues.length) return h('div', { class: 'stack' }, head, ui.notice('good', 'No recurring problems found', 'Nothing systematic went wrong in this scope.'));
   return h('div', { class: 'stack' }, head, h('div', { class: 'issues' }, issues.map((i) => h('div', { class: ['issue', i.count >= 3 ? 'high' : i.count === 2 ? 'medium' : 'low'] },
     h('div', { class: 'head' }, ui.badge(`× ${i.count}`, i.count >= 3 ? 'bad' : 'warn'), h('span', { class: 'title' }, i.title || i.code)),
-    i.fix ? h('div', { class: 'fix' }, h('b', null, 'Fix: '), i.fix) : null))));
+    i.fix ? h('div', { class: 'fix' }, h('b', null, 'Fix: '), i.fix) : null,
+    i.fixed_by ? h('span', { class: 'fixed' }, ui.badge(`Fixed in system: ${i.fixed_by}`, 'good')) : null))),
+    pm?.limited ? h('div', { class: 'tiny faint' }, 'Based on the latest 50 closed trades in this scope.') : null);
 }
 
 export function renderTimeline(items) {

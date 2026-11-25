@@ -52,8 +52,13 @@ def heartbeat(
     regime: dict[str, Any] | None = None,
     status: dict[str, Any] | None = None,
     last_error: str | None = None,
+    clear_next_cycle: bool = False,
 ) -> None:
-    """Refresh the heartbeat and the live status fields shown on the dashboard."""
+    """Refresh the heartbeat and the live status fields shown on the dashboard.
+
+    ``clear_next_cycle`` empties ``next_cycle_at`` (no job left today / holiday) instead of
+    leaving a stale past time that the dashboard would show as "next cycle due".
+    """
     row = get_status_row(session)
     row.heartbeat_at = now
     row.pid = os.getpid()
@@ -63,6 +68,8 @@ def heartbeat(
         row.activity = activity
     if next_cycle_at is not None:
         row.next_cycle_at = next_cycle_at
+    elif clear_next_cycle:
+        row.next_cycle_at = None
     if market_open is not None:
         row.market_open = market_open
     if data_feed_ok is not None:

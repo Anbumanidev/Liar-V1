@@ -703,6 +703,34 @@ def build_eod_report(
     return report
 
 
+#: Fields of a next-day plan item shown in the EOD e-mail.
+PLAN_FIELDS = ("setup", "direction", "trigger", "stop", "target", "rr", "score", "reasons", "affordable")
+
+
+def next_day_plan_section(session: Session, on_or_after: date, *, opening_check: str = "09:20") -> dict[str, Any]:
+    """Optional EOD keys for tomorrow's INTRADAY plan (``data.watchlists.latest_plan``).
+
+    Returns ``{"next_day_plan": [ {symbol, setup, direction, trigger, stop, target, rr, score, reasons,
+    affordable, status}, ...], "next_day_plan_for": ISO date, "next_day_plan_name": str,
+    "next_day_plan_check": "HH:MM"}`` or ``{}`` when no plan exists (the template tolerates both).
+    Read-only; the plan is a paper watchlist, not advice - every trade still needs the risk manager.
+    """
+    from data.watchlists import latest_plan
+
+    plan = latest_plan(session, on_or_after=on_or_after)
+    if plan is None:
+        return {}
+    rows: list[dict[str, Any]] = []
+    for item in plan["items"]:
+        p = item.get("plan") or {}
+        row = {"symbol": item["symbol"], "status": item.get("status")}
+        row.update({k: p.get(k) for k in PLAN_FIELDS})
+        row["reasons"] = list(row.get("reasons") or [])
+        rows.append(row)
+    return {"next_day_plan": rows, "next_day_plan_for": plan.get("for_date"), "next_day_plan_name": plan.get("name"),
+            "next_day_plan_check": opening_check}
+
+
 # =========================================================================== chart
 
 # Light e-mail surface; single series -> no legend (the title names it).

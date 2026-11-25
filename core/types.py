@@ -503,6 +503,13 @@ class TradeProposal(_Model):
     debate_bear: int | None = None            # bear conviction 0-100
     room_r: float | None = None               # nearest opposing level, in R from the entry
     ltp_at: datetime | None = None            # timestamp of ``ltp`` (fresh quote at risk time)
+    # ---- price behaviour at decision time (features.price_behaviour; None = not computed -> rules skipped)
+    range_pos: float | None = None            # 0 = at the day's low, 1 = at the day's high
+    range_vs_adr: float | None = None         # today's range so far / 14-day average daily range
+    vwap_ext_atr: float | None = None         # (price - VWAP) / 5m ATR, signed
+    continuation_rate: float | None = None    # share of past similar moves (same zone) that continued
+    behaviour_samples: int | None = None      # how many past sessions that rate is based on
+    behaviour: dict[str, Any] | None = None   # full snapshot for the dashboard / post-mortem
 
     @field_validator("symbol")
     @classmethod

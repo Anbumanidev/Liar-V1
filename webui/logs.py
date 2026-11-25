@@ -18,7 +18,7 @@ from typing import Any
 
 #: ``file=`` values accepted by ``/api/logs`` (engine = engine.log, others = <name>.jsonl).
 LOG_FILES: tuple[str, ...] = (
-    "engine", "errors", "decisions", "orders", "trades", "risk", "scans", "agents", "debates", "meta",
+    "engine", "activity", "errors", "decisions", "orders", "trades", "risk", "scans", "agents", "debates", "meta",
     "approvals", "control", "capital", "shadow", "settings", "notifications", "audit", "web",
 )
 TEXT_LOGS = frozenset({"engine", "web"})
@@ -94,10 +94,11 @@ def parse_jsonl_lines(lines: list[str]) -> list[dict[str, Any]]:
 
 
 def read_log(log_dir: Path, day: date, name: str, lines: int = 200, query: str | None = None,
-             level: str | None = None) -> dict[str, Any]:
+             level: str | None = None, stage: str | None = None, symbol: str | None = None) -> dict[str, Any]:
     path = log_path(log_dir, day, name)
-    n = max(1, min(int(lines), 2000))
-    raw = tail_lines(path, n * (4 if (query or level) else 1) + (50 if name in TEXT_LOGS else 0))
+    n = max(1, min(int(lines), 3000))
+    narrowed = bool(query or level or stage or symbol)
+    raw = tail_lines(path, n * (4 if narrowed else 1) + (50 if name in TEXT_LOGS else 0))
     if name in TEXT_LOGS:
         entries = parse_text_lines(raw)
         if level:
@@ -109,6 +110,12 @@ def read_log(log_dir: Path, day: date, name: str, lines: int = 200, query: str |
         if level:
             lv = level.upper()
             entries = [e for e in entries if str(e.get("severity") or e.get("level") or "").upper() == lv]
+        if stage:
+            stages = {x.strip().lower() for x in stage.split(",") if x.strip()}
+            entries = [e for e in entries if str(e.get("stage") or "").lower() in stages]
+        if symbol:
+            sym = symbol.strip().upper()
+            entries = [e for e in entries if str(e.get("symbol") or "").upper() == sym]
     if query:
         q = query.lower()
         entries = [e for e in entries if q in json.dumps(e, ensure_ascii=False, default=str).lower()]
@@ -118,7 +125,11 @@ def read_log(log_dir: Path, day: date, name: str, lines: int = 200, query: str |
 
 
 class LogFollower:
-    """Incrementally read lines appended to today's engine.log (offset tracking for SSE)."""
+    """Incrementally read lines appended to today's log file (offset tracking for SSE).
+
+    Text logs (engine.log) are parsed into ``{ts, level, source, message}``; JSONL logs
+    (activity.jsonl) into their JSON objects. Handles a missing file, truncation and day rollover.
+    """
 
     def __init__(self, log_dir: Path, name: str = "engine") -> None:
         self.log_dir = Path(log_dir)
@@ -163,7 +174,7 @@ class LogFollower:
         parts = textbuf.split("\n")
         self._partial = parts.pop() if not textbuf.endswith("\n") else ""
         lines = [p.rstrip("\r") for p in parts if p.strip()]
-        return parse_text_lines(lines)
+        return parse_text_lines(lines) if self.name in TEXT_LOGS else parse_jsonl_lines(lines)
 
 
 def file_size(path: Path) -> int:

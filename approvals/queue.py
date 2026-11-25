@@ -151,6 +151,13 @@ class ApprovalQueue:
                     proposal = proposal.model_copy(update={"ltp": float(q.ltp), "ltp_at": q.timestamp})
             except Exception as exc:  # noqa: BLE001 - keep the stored quote
                 logger.warning(f"[approvals] live quote {proposal.symbol}: {exc}")
+            # Price behaviour again at the approval price (the stock may have run to the top meanwhile).
+            from agents.graph import behaviour_fields, price_behaviour_for
+
+            beh = price_behaviour_for(self.data, proposal.symbol, proposal.mode, proposal.direction, self.clock.now(),
+                                      live_price=proposal.ltp or proposal.entry_price, settings=self.settings)
+            if beh is not None:
+                proposal = proposal.model_copy(update=behaviour_fields(beh))
         verdict = self.risk.evaluate(proposal, state, check_timing=self._check_timing(proposal.mode))
         now = to_ist(self.clock.now())
         if not verdict.approved:

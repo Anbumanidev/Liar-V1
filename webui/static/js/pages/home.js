@@ -1,6 +1,6 @@
 // Home cockpit: capital & P&L KPIs, alerts, open positions, approvals, autonomy + engine controls, live activity.
-import { api, on } from '../api.js';
-import { h, icon } from '../dom.js';
+import { api, on, qs } from '../api.js';
+import { h, icon, debounce } from '../dom.js';
 import * as f from '../format.js';
 import * as ui from '../ui.js';
 import { go, pageTimers } from '../router.js';
@@ -9,28 +9,36 @@ import { positionCard } from '../components/positions.js';
 import { approvalsList } from '../components/approvals.js';
 import { autonomyControl, engineControls, closePositionButton } from '../components/controls.js';
 import { openDecision } from '../components/decision.js';
+import { summaryBlock } from '../components/summary.js';
+import { planTable } from '../components/followup.js';
+import { scopeParams, scopeLabel, inScope } from '../scope.js';
 
 export const title = 'Home';
 
 export function mount(root) {
   const t = pageTimers();
-  const kpis = h('div', { class: 'kpis' }, Array.from({ length: 6 }, () => h('div', { class: 'kpi' }, ui.skeleton(3))));
+  const kpis = summaryBlock();
+  const scopeTitle = h('span', { class: 'scope-tag' });
   const alerts = h('div', { class: 'alerts' });
   const positions = ui.card('Open positions', { hint: 'live LTP · unrealized P&L net of entry charges', body: ui.skeleton(4) });
   const approvals = ui.card('Waiting for your approval', { body: ui.skeleton(3) });
   approvals.id = 'approvals';
   const autonomy = ui.card('Who decides?', { hint: 'auto vs human-in-the-loop', body: ui.skeleton(3) });
   const engine = ui.card('Engine', { body: ui.skeleton(2) });
+  const planHint = h('span', { class: 'hint' });
+  const planCard = ui.card(h('div', { class: 'row' }, h('h2', null, 'Plan'), planHint), { flush: true,
+    actions: h('a', { href: '#/watchlists?plans=1', class: 'btn sm ghost' }, 'Follow-up →') });
+  planCard.classList.add('hidden');
   const feedList = h('div', { class: 'feed' });
   const activity = ui.card('Latest activity', { hint: 'live', flush: true,
     actions: h('a', { href: '#/live', class: 'btn sm ghost' }, 'Open Live →'), body: h('div', { class: 'feed-scroll' }, feedList) });
 
   root.append(
-    h('div', { class: 'page-head' }, h('h1', null, 'Cockpit'), h('span', { class: 'sub', id: 'home-batch' }, ''), h('span', { class: 'grow' }),
+    h('div', { class: 'page-head' }, h('h1', null, 'Cockpit'), scopeTitle, h('span', { class: 'sub', id: 'home-batch' }, ''), h('span', { class: 'grow' }),
       h('button', { class: 'btn sm', title: 'Refresh (r)', onclick: () => refresh(false) }, icon('refresh', 14), 'Refresh')),
     kpis, alerts,
     h('div', { class: 'home-grid' },
-      h('div', { class: 'grid' }, positions, approvals),
+      h('div', { class: 'grid' }, positions, planCard, approvals),
       h('div', { class: 'grid' }, autonomy, engine, activity)));
 
   let autonomyCtl = null;
@@ -38,29 +46,7 @@ export function mount(root) {
 
   const renderOverview = (o) => {
     const cap = o.capital || {};
-    const ov = o.overall || {};
-    const today = o.today || {};
-    const bs = o.batch_stats || {};
-    document.getElementById('home-batch').textContent = o.batch ? `${o.batch.name} · ${o.batch.status} · started ${f.date(o.batch.started_at)}` : 'No active batch';
-    const totalNow = f.isNum(ov.current_capital) ? ov.current_capital : cap.equity;
-    kpis.replaceChildren(
-      ui.kpi({ label: 'Total capital now', value: f.inr(totalNow), tone: 'info',
-        sub: h('span', null, 'Net invested ', h('b', null, f.inr(ov.net_invested)), ov.source === 'fallback' ? ' (approx.)' : ''),
-        help: 'Current equity of the active batch incl. unrealized P&L' }),
-      ui.kpi({ label: 'Overall P&L (all batches)', value: ui.money(ov.overall_pnl), tone: f.kpiTone(ov.overall_pnl),
-        sub: h('span', null, h('b', { class: f.tone(ov.overall_pnl_pct) }, f.pct(ov.overall_pnl_pct, { sign: true })), ' on net invested') }),
-      ui.kpi({ label: "Today's P&L", value: ui.money(today.total), tone: f.kpiTone(today.total),
-        sub: h('span', null, 'realized ', h('b', { class: f.tone(today.realized) }, f.inr(today.realized, { sign: true })),
-          ' · unrealized ', h('b', { class: f.tone(today.unrealized) }, f.inr(today.unrealized, { sign: true }))) }),
-      ui.kpi({ label: 'This batch P&L', value: ui.money(cap.pnl), tone: f.kpiTone(cap.pnl),
-        sub: h('span', null, h('b', { class: f.tone(cap.pnl_pct) }, f.pct(cap.pnl_pct, { sign: true })), ` · start ${f.inr(cap.starting_capital)}`) }),
-      ui.kpi({ label: 'Win rate (this batch)', value: f.isNum(bs.win_rate) ? `${f.num(bs.win_rate, 1)}%` : '–',
-        sub: h('span', null, h('b', { class: 'pos' }, `${bs.wins ?? 0} W`), ' / ', h('b', { class: 'neg' }, `${bs.losses ?? 0} L`),
-          ` · today ${today.wins ?? 0}W/${today.losses ?? 0}L`) }),
-      ui.kpi({ label: 'Drawdown · tier', value: f.isNum(cap.drawdown_pct) ? `${f.num(cap.drawdown_pct, 2)}%` : '–',
-        tone: cap.tier && cap.tier !== 'NORMAL' ? 'warn' : '',
-        sub: h('span', null, h('b', null, cap.tier || '–'), ` · HWM ${f.inr(cap.hwm)} · reserve ${f.inr(cap.reserve)}`) }),
-    );
+    document.getElementById('home-batch').textContent = o.batch ? `· active: ${o.batch.name} (${o.batch.status})` : '· no active batch';
     // alerts
     const al = [];
     if (cap.halted || o.batch?.status === 'HALTED') al.push(ui.notice('bad', 'HALTED - capital protection stopped trading', cap.halt_reason || o.batch?.halt_reason || 'Review before resuming from the Streamlit console.'));
@@ -104,35 +90,74 @@ export function mount(root) {
     while (feedList.children.length > 40) feedList.lastChild.remove();
     feedList.parentElement.querySelector('.empty')?.remove();
   };
+  let feedSeq = 0;   // a stale response (scope changed meanwhile) never overwrites the feed
   const loadFeed = async () => {
+    const my = ++feedSeq;
     try {
-      const d = await api.get('/api/decisions?limit=20', { background: true });
+      const d = await api.get('/api/decisions' + qs({ limit: 20, ...scopeParams() }), { background: true });
+      if (my !== feedSeq) return;
       feedList.replaceChildren();
       const rows = (d.rows || []).slice().reverse();
       for (const r of rows) addFeed({ kind: 'decision', ts: r.time, data: r }, false);
-      if (!rows.length) feedList.replaceChildren(ui.empty('No activity yet today', 'Analysed stocks, orders and exits stream in here live.', 'live'));
-    } catch (err) { feedList.replaceChildren(ui.errorBox(err)); }
+      if (!rows.length) feedList.replaceChildren(ui.empty('No analysis in this scope yet', 'Analysed stocks, orders and exits stream in here live.', 'live'));
+    } catch (err) { if (my === feedSeq) feedList.replaceChildren(ui.errorBox(err)); }
   };
 
+  // ---- next-day plan (hidden when there is none or the follow-up backend is not deployed yet)
+  let planSeq = 0;
+  const loadPlan = async () => {
+    const my = ++planSeq;
+    try {
+      const d = await api.get('/api/plan', { background: true });
+      if (my !== planSeq) return;
+      const p = d.plan;
+      if (!p) { planCard.classList.add('hidden'); return; }
+      const c = p.counts || {};
+      planCard.head.querySelector('h2').textContent = p.label || 'Plan';
+      planHint.textContent = `${(p.items || []).length} stock(s) · ${c.ACTIVE ?? 0} active · ${c.TRIGGERED ?? 0} triggered · ${c.INVALIDATED ?? 0} invalidated`;
+      planCard.body.replaceChildren(planTable(p.items || [], { onSymbol: true }),
+        h('div', { class: 'card-b tiny faint' }, 'From the end-of-day scan. A plan is not an order: every entry still goes through the AI and the risk manager.'));
+      planCard.classList.remove('hidden');
+    } catch {
+      if (my === planSeq) planCard.classList.add('hidden');
+    }
+  };
+
+  let sumSeq = 0;
+  const loadSummary = async (background = true) => {
+    const my = ++sumSeq;
+    scopeTitle.replaceChildren('Showing ', h('b', null, scopeLabel()));
+    try {
+      const d = await api.get('/api/summary' + qs(scopeParams()), { background });
+      if (my === sumSeq) kpis.render(d);
+    } catch (err) { if (my === sumSeq) kpis.fail(err); }
+  };
+  const summarySoon = debounce(() => loadSummary(), 1500);
   const refresh = (background = true) => {
-    loadOverview({ background }).catch((err) => kpis.replaceChildren(ui.errorBox(err, 'Could not load the overview')));
+    loadOverview({ background }).catch(() => {});
+    loadSummary(background);
     loadApprovals(background);
   };
 
   t.track(on('overview', renderOverview));
   t.track(on('sse:approvals', () => loadApprovals()));
-  t.track(on('sse:decision', (r) => addFeed({ kind: 'decision', ts: r.time, data: r }, true)));
-  t.track(on('sse:order', (o) => addFeed({ kind: 'order', ts: o.time, data: o }, true)));
-  t.track(on('sse:trade', (tr) => addFeed({ kind: 'trade', ts: tr.exit_time, data: tr }, true)));
+  t.track(on('sse:decision', (r) => { if (inScope(r)) addFeed({ kind: 'decision', ts: r.time, data: r }, true); }));
+  t.track(on('sse:order', (o) => { addFeed({ kind: 'order', ts: o.time, data: o }, true); summarySoon(); }));
+  t.track(on('sse:trade', (tr) => { addFeed({ kind: 'trade', ts: tr.exit_time, data: tr }, true); summarySoon(); }));
+  t.track(on('scope', () => { loadSummary(false); loadFeed(); }));
   t.track(on('poll:tick', () => loadOverview().catch(() => {})));
   const onRefresh = () => refresh(false);
   window.addEventListener('page:refresh', onRefresh);
   t.track(() => window.removeEventListener('page:refresh', onRefresh));
   t.every(15000, () => loadOverview().catch(() => {}));
+  t.every(20000, () => loadSummary());
+  t.every(60000, loadPlan);
+  t.track(on('watchlists:changed', () => loadPlan()));
 
   if (store.overview) renderOverview(store.overview);
   refresh(true);
   loadFeed();
+  loadPlan();
   return () => t.clear();
 }
 

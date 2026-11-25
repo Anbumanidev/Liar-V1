@@ -172,3 +172,21 @@ def test_diagnose_overloaded_day(tmp_path: Path, session) -> None:  # type: igno
 def test_diagnose_empty_day(tmp_path: Path) -> None:
     rep = diagnose(None, DAY, tmp_path)
     assert rep["findings"] == [] and rep["llm"]["calls"] == 0
+
+
+def test_bought_high_from_the_behaviour_snapshot(session, bel) -> None:  # type: ignore[no-untyped-def]
+    from sqlalchemy import select as _select
+
+    _, first, _ = bel
+    order = session.execute(_select(Order).where(Order.position_id == first)).scalar_one()
+    meta = dict(order.meta_json)
+    meta["proposal"] = {**meta["proposal"], "behaviour": {
+        "range_pos": 0.7151, "range_vs_adr": 1.1234, "vwap_ext_atr": 0.977, "vwap": 401.62, "day_low": 395.8,
+        "day_high": 405.1, "continuation_rate": 0.0, "samples": 8, "verdict": "CHASING", "notes": []}}
+    order.meta_json = meta
+    session.commit()
+    pm = analyze_position(session, first)
+    issue = next(i for i in pm["diagnosis"] if i["code"] == "BOUGHT_HIGH")
+    assert issue["severity"] == "high" and "72% toward the high" in issue["detail"]
+    assert "112% of its normal range" in issue["detail"] and "only 0% of such moves continued" in issue["detail"]
+    assert "CHASING_HIGH" in issue["fixed_by"] and pm["behaviour"]["verdict"] == "CHASING"

@@ -228,6 +228,7 @@ class CommandType(StrEnum):
     REENABLE_STRATEGY = "REENABLE_STRATEGY"
     SEND_TEST_EMAIL = "SEND_TEST_EMAIL"
     RUN_JOB = "RUN_JOB"
+    SCAN_NOW = "SCAN_NOW"   # screen a mode's watchlist now + AI on the best setups; analysis only, never trades
 
 
 class CommandStatus(StrEnum):
@@ -399,6 +400,9 @@ class RiskRule(StrEnum):
     DEBATE_AGAINST = "DEBATE_AGAINST"          # bear case clearly won the debate
     NO_ROOM = "NO_ROOM"                        # opposing level too close to the entry
     REENTRY_COOLDOWN = "REENTRY_COOLDOWN"      # same symbol stopped out recently
+    # ---- price behaviour (added 2026-11-25: all 3 losses were bought high in an exhausted day range)
+    CHASING_HIGH = "CHASING_HIGH"              # buying the top / selling the bottom of an exhausted day range
+    HISTORY_FADES = "HISTORY_FADES"            # this stock's recent sessions: such moves usually reverse
 
 
 class Autonomy(StrEnum):

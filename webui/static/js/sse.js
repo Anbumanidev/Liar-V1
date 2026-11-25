@@ -3,7 +3,7 @@
 import { api, emit, qs } from './api.js';
 import { setServerTime } from './format.js';
 
-const TYPES = ['hello', 'decision', 'order', 'trade', 'status', 'approvals', 'log', 'session_expired'];
+const TYPES = ['hello', 'decision', 'order', 'trade', 'status', 'approvals', 'log', 'activity', 'session_expired'];
 const cursors = { decision: null, order: null, trade: null };
 let es = null;
 let state = 'idle';            // idle | live | reconnecting | polling

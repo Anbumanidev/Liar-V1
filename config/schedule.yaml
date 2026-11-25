@@ -14,6 +14,8 @@ intraday_squareoff: "15:15"
 cnc_time_stop: "15:20"
 eod_processing: "15:30"
 eod_report: "15:45"
+next_day_plan: "15:40"      # rank tomorrow's INTRADAY candidates from today's daily bars (engine.next_day_plan_enabled)
+opening_check: "09:20"      # re-check today's plan against the opening prices (triggered / gapped past / below stop)
 swing_scan: "16:00"
 swing_scan_deadline: "18:00"
 approval_timeout_check_seconds: 15

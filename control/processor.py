@@ -29,6 +29,7 @@ from core.enums import (
     PositionStatus,
     RiskRule,
 )
+from core.activity import activity
 from core.errors import StopLossLooseningError, TradingSystemError
 from core.logging import log_event, to_jsonable
 from paper_engine.broker import OrderRejected, get_mode_state
@@ -38,6 +39,32 @@ from storage.audit import audit, record_error
 from storage.models import ControlCommand, Order, Position
 
 Handler = Callable[[Session, Any, str], CommandResult]
+
+
+def describe_result(res: Any, *, routed: bool) -> str:
+    """Plain-language one-liner for an analysis result (dashboard toast / activity log)."""
+    head = f"{res.symbol} {res.mode.value}"
+    secs = f" [{res.latency_ms / 1000:.0f}s]" if getattr(res, "latency_ms", None) else ""
+    tail = "" if routed else " (analysis only - not traded)"
+    if res.error:
+        return f"{head}: analysis failed - {res.error}{secs}"
+    if res.filtered_reason:
+        return f"{head}: no trade - {res.filtered_reason}{tail}{secs}"
+    meta, verdict = res.meta, res.verdict
+    if meta is not None and meta.decision.value == "NO_TRADE":
+        why = meta.why_not or "the AI decided not to trade"
+        if why == "no strategy signal":
+            why = "no strategy setup right now (none of the mode's strategies matched the chart)"
+        return f"{head}: no trade - {why}{tail}{secs}"
+    if meta is not None and verdict is not None:
+        side = meta.decision.value
+        conf = res.confluence.score if res.confluence is not None else None
+        plan = (f"{side} {meta.strategy or ''} entry {meta.entry_price}, SL {meta.stop_loss}, T1 {meta.target_1} "
+                f"(confidence {meta.confidence}" + (f", confluence {conf:.0f}" if conf is not None else "") + ")")
+        if verdict.approved:
+            return f"{head}: {plan} - risk manager APPROVED qty {verdict.qty} -> {res.final_action}{tail}{secs}"
+        return f"{head}: {plan} - risk manager REJECTED: {verdict.message}{tail}{secs}"
+    return f"{head}: {res.final_action}{tail}{secs}"
 
 
 class CommandProcessor:
@@ -76,28 +103,97 @@ class CommandProcessor:
             CommandType.REENABLE_STRATEGY: self._reenable_strategy,
             CommandType.SEND_TEST_EMAIL: self._test_email,
             CommandType.RUN_JOB: self._run_job,
+            CommandType.SCAN_NOW: self._scan_now,
         }
+        self._worker: Any = None   # single background thread for long commands (live engine only)
+        self._queued: dict[Any, int] = {}       # future -> command id (claimed, waiting for the worker)
+        self.active: dict[int, str] = {}        # command id -> label, while a long command runs
+
+    #: Commands that can take minutes (LLM analysis). In the live engine they run on a background
+    #: worker so position monitoring / stop-losses are never paused behind them (2026-11-25: one
+    #: "Analyze now" held the engine loop for 78 s).
+    LONG_COMMANDS = frozenset({CommandType.ANALYZE_NOW, CommandType.SCAN_NOW, CommandType.RUN_JOB})
 
     # ------------------------------------------------------------------ loop
 
     def process_pending(self, limit: int = 20) -> int:
-        """Execute up to ``limit`` pending commands (oldest first). Returns how many ran."""
+        """Execute up to ``limit`` pending commands (oldest first). Returns how many ran / started."""
         with self.svc.session() as s:
-            ids = [c.id for c in pending_commands(s, limit)]
-        for cid in ids:
-            self.execute(cid)
-        return len(ids)
+            rows = [(c.id, c.command_type) for c in pending_commands(s, limit)]
+        for cid, ctype in rows:
+            if self.engine is not None and ctype in self.LONG_COMMANDS:
+                if self._claim(cid):
+                    fut = self._background().submit(self._run_claimed, cid, str(ctype))
+                    self._queued[fut] = cid
+                    fut.add_done_callback(lambda f: self._queued.pop(f, None))
+            else:
+                self.execute(cid)
+        return len(rows)
 
-    def execute(self, command_id: int) -> CommandResult:
-        """Run one command in its own transaction. Never raises."""
+    def _background(self) -> Any:
+        if self._worker is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="long-command")
+        return self._worker
+
+    def _run_claimed(self, command_id: int, label: str = "") -> None:
+        self.active[command_id] = label or f"command #{command_id}"
+        try:
+            self._run(command_id)
+        except Exception as exc:  # noqa: BLE001 - never kill the worker
+            logger.exception(f"[control] background command {command_id} crashed: {exc}")
+        finally:
+            self.active.pop(command_id, None)
+
+    def shutdown(self) -> int:
+        """Engine stop: cancel queued long commands and close them as FAILED (never left RUNNING).
+
+        The one in flight (if any) finishes on its own; returns how many were cancelled.
+        """
+        if self._worker is None:
+            return 0
+        cancelled = [cid for fut, cid in list(self._queued.items()) if fut.cancel()]
+        self._worker.shutdown(wait=False, cancel_futures=True)
+        svc = self.svc
+        msg = "engine stopped before this command ran - please retry"
+        with svc.session() as s:
+            for cid in cancelled:
+                row = s.get(ControlCommand, cid)
+                if row is not None and row.status == CommandStatus.RUNNING.value:
+                    row.status = CommandStatus.FAILED.value
+                    row.completed_at = svc.clock.now()
+                    row.error = msg
+                    row.result_json = {"ok": False, "message": msg, "rule": None, "data": {}}
+            s.commit()
+        for cid in cancelled:
+            activity("command", f"command #{cid}: FAILED - {msg}", clock=svc.clock, level="warning",
+                     command_id=cid, status="FAILED")
+        return len(cancelled)
+
+    def _claim(self, command_id: int) -> bool:
+        """PENDING -> RUNNING (False if someone else took it)."""
         svc = self.svc
         with svc.session() as s:
             row = s.get(ControlCommand, command_id)
             if row is None or row.status != CommandStatus.PENDING.value:
-                return CommandResult(ok=False, message="command not pending")
+                return False
             row.status = CommandStatus.RUNNING.value
             row.picked_at = svc.clock.now()
             s.commit()
+            ctype, actor = row.command_type, row.requested_by
+        activity("command", f"{ctype} #{command_id} from {actor}: started", clock=svc.clock,
+                 command_id=command_id, type=ctype, status="RUNNING")
+        return True
+
+    def execute(self, command_id: int) -> CommandResult:
+        """Run one command in its own transaction. Never raises."""
+        if not self._claim(command_id):
+            return CommandResult(ok=False, message="command not pending")
+        return self._run(command_id)
+
+    def _run(self, command_id: int) -> CommandResult:
+        svc = self.svc
         with svc.session() as s:
             row = s.get(ControlCommand, command_id)
             ctype = CommandType(row.command_type)
@@ -117,15 +213,25 @@ class CommandProcessor:
                 result = CommandResult(ok=False, message=f"{type(exc).__name__}: {exc}")
                 status = CommandStatus.FAILED
                 logger.error(f"[control] command {command_id} {row.command_type} failed:\n{traceback.format_exc()}")
+            s.commit()   # end the handler's transaction so the re-read below sees other writers
             row = s.get(ControlCommand, command_id)
-            row.status = status.value
-            row.completed_at = svc.clock.now()
-            row.result_json = to_jsonable(result.model_dump(mode="json"))
-            row.error = None if result.ok else result.message[:2000]
+            s.refresh(row)
+            if row.status != CommandStatus.RUNNING.value:
+                # closed meanwhile (e.g. a restarted engine failed it as orphaned): keep that outcome
+                logger.warning(f"[control] command {command_id} finished as {status.value} but was already "
+                               f"{row.status}; not overwriting")
+            else:
+                row.status = status.value
+                row.completed_at = svc.clock.now()
+                row.result_json = to_jsonable(result.model_dump(mode="json"))
+                row.error = None if result.ok else result.message[:2000]
             s.commit()
         log_event("control", {"event": "executed", "id": command_id, "type": ctype.value, "status": status.value,
                               "ok": result.ok, "rule": result.rule.value if result.rule else None,
                               "message": result.message}, clock=svc.clock)
+        activity("command", f"{ctype.value} #{command_id}: {status.value} - {result.message}", clock=svc.clock,
+                 level="success" if result.ok else "warning", command_id=command_id, type=ctype.value,
+                 status=status.value)
         return result
 
     # ------------------------------------------------------------------ engine
@@ -212,12 +318,26 @@ class CommandProcessor:
     def _analyze_now(self, s: Session, p: Any, actor: str) -> CommandResult:
         res = self.svc.pipeline.analyze(p.symbol, Mode(p.mode), batch_id=self.svc.ctx.batch_id, force=True,
                                         route=p.route)
-        return CommandResult(ok=res.error is None,
-                             message=f"{res.symbol} {res.mode.value}: {res.final_action}"
-                                     + (f" ({res.meta.decision.value}, confidence {res.meta.confidence})" if res.meta else "")
-                                     + (f" - {res.filtered_reason}" if res.filtered_reason else ""),
+        message = describe_result(res, routed=bool(p.route))
+        try:   # follow-up lists show the latest analysis of their stocks (never fails the command)
+            from data.watchlists import record_analysis
+
+            with self.svc.session() as ws:
+                if record_analysis(ws, res.symbol, decision_id=res.decision_id, summary=message,
+                                   now=self.svc.clock.now()):
+                    ws.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[control] could not record the analysis on follow-up lists: {exc}")
+        return CommandResult(ok=res.error is None, message=message,
                              data={"decision_id": res.decision_id, "final_action": res.final_action,
                                    "latency_ms": res.latency_ms, "error": res.error})
+
+    def _scan_now(self, s: Session, p: Any, actor: str) -> CommandResult:
+        from scheduler.jobs import scan_now
+
+        out = scan_now(self.svc, Mode(p.mode), use_llm=bool(p.use_llm), symbols=getattr(p, "symbols", None),
+                       watchlist_id=getattr(p, "watchlist_id", None))
+        return CommandResult(ok="error" not in out, message=out.get("message", str(out)), data=to_jsonable(out))
 
     def _position(self, s: Session, position_id: int) -> Position:
         pos = s.get(Position, position_id)
@@ -327,5 +447,10 @@ class CommandProcessor:
     def _run_job(self, s: Session, p: Any, actor: str) -> CommandResult:
         from scheduler.jobs import run_job
 
-        res = run_job(self.svc, p.job, force=True)
+        engine = self.engine
+        if engine is not None and p.job in getattr(engine, "LOCKED_JOBS", ()) | {"monitor"}:
+            with engine._lock:   # state-mutating jobs never race the monitor (runs on the long-command worker)
+                res = run_job(self.svc, p.job, force=True)
+        else:
+            res = run_job(self.svc, p.job, force=True)
         return CommandResult(ok="error" not in res, message=f"job {p.job}: {res}", data={"result": to_jsonable(res)})

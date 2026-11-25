@@ -9,6 +9,7 @@ rows newer than the client's cursors, and closes it:
 * ``approvals`` - pending approvals count changed
 * ``status``    - engine heartbeat/status + capital (only when something changed)
 * ``log``       - new lines appended to today's ``engine.log`` (file offset tracking)
+* ``activity``  - new events appended to today's ``activity.jsonl`` (what the engine / AI is doing)
 
 A comment heartbeat (``: ping``) is sent every 15 s. The stream ends with
 ``session_expired`` when the cookie it was opened with passes the idle deadline (the browser
@@ -48,6 +49,7 @@ class StreamState:
     approvals_sig: tuple[Any, ...] | None = None
     status_sig: tuple[Any, ...] | None = None
     follower: LogFollower | None = None
+    activity: LogFollower | None = None
 
 
 def init_state(ctx: WebContext, cursors: dict[str, int | None]) -> StreamState:
@@ -59,8 +61,11 @@ def init_state(ctx: WebContext, cursors: dict[str, int | None]) -> StreamState:
         st.trade = latest["trade"] if cursors.get("trade") is None else int(cursors["trade"] or 0)
         for oid, status in s.execute(select(Order.id, Order.status).where(Order.status == "PENDING")).all():
             st.pending_orders[oid] = status
+    today = ctx.clock.now().date()
     st.follower = LogFollower(ctx.log_dir, "engine")
-    st.follower.start(ctx.clock.now().date())
+    st.follower.start(today)
+    st.activity = LogFollower(ctx.log_dir, "activity")
+    st.activity.start(today)
     return st
 
 
@@ -133,6 +138,14 @@ def poll_once(ctx: WebContext, st: StreamState) -> list[tuple[str, Any]]:
             lines = []
         if lines:
             out.append(("log", {"file": "engine", "entries": lines[-200:]}))
+    if st.activity is not None:
+        try:
+            acts = st.activity.poll(now.date())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[webui] activity follow failed: {exc}")
+            acts = []
+        if acts:
+            out.append(("activity", {"entries": acts[-300:]}))
     return out
 
 

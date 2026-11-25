@@ -38,7 +38,8 @@ function baseOptions(c, intraday = true) {
       fontFamily: getComputedStyle(document.body).fontFamily, attributionLogo: false },
     grid: { vertLines: { color: c.grid }, horzLines: { color: c.grid } },
     rightPriceScale: { borderColor: c.border, scaleMargins: { top: 0.08, bottom: 0.22 } },
-    timeScale: { borderColor: c.border, timeVisible: intraday, secondsVisible: false, rightOffset: 4, barSpacing: 7 },
+    timeScale: { borderColor: c.border, timeVisible: intraday, secondsVisible: false, rightOffset: 4, barSpacing: 7,
+      minBarSpacing: 0.1 },
     crosshair: { mode: 0 },
     localization: { priceFormatter: (p) => f.num(p, 2) },
   };
@@ -51,7 +52,88 @@ const LINE_STYLE = (c) => ({
   ltp: { color: c.text2, style: 1, w: 1 },
 });
 
-/** Candlestick chart with volume, EMA9/EMA21/VWAP overlays, markers and price lines. */
+// ------------------------------------------------------------------ history limits (mirror webui/candles.py)
+export const TF_LABEL = { '1m': '1-minute', '5m': '5-minute', '10m': '10-minute', '15m': '15-minute', '20m': '20-minute',
+  '30m': '30-minute', '1h': '1-hour', '5h': '5-hour', '1d': 'Daily', '1wk': 'Weekly' };
+/** Calendar days of history the provider keeps per timeframe (Yahoo; resampled timeframes inherit their source). */
+export const TF_HISTORY_DAYS = { '1m': 7, '5m': 59, '10m': 59, '15m': 59, '20m': 59, '30m': 59, '1h': 729, '5h': 729,
+  '1d': 4383, '1wk': 10957 };
+const TF_LIMIT_TEXT = { '1m': '~7 days', '5m': '~59 days', '10m': '~59 days', '15m': '~59 days', '20m': '~59 days',
+  '30m': '~59 days', '1h': '~2 years', '5h': '~2 years', '1d': '~12 years', '1wk': 'the full listed history' };
+export const RANGES = [['1D', 1], ['5D', 7], ['1M', 30], ['3M', 91], ['6M', 182], ['1Y', 365], ['5Y', 1826], ['MAX', 0]];
+/** Range loaded when a symbol / timeframe is opened, and how much of it is shown (sessions or days). */
+export const DEFAULT_LOAD = { '1m': '5D', '5m': '5D', '10m': '5D', '15m': '5D', '20m': '5D', '30m': '5D', '1h': '1Y', '5h': '1Y',
+  '1d': '5Y', '1wk': 'MAX' };
+export const DEFAULT_VIEW = { '1m': 'session', '5m': 'session', '10m': 'session', '15m': 'session', '20m': 'session',
+  '30m': 'session', '1h': 91, '5h': 182, '1d': 365, '1wk': 1826 };
+/** Bars fetched per scroll-back page. */
+export const OLDER_BARS = { '1m': 1500, '5m': 750, '10m': 380, '15m': 250, '20m': 190, '30m': 130, '1h': 420, '5h': 240,
+  '1d': 500, '1wk': 260 };
+
+/** Is a range button usable for a timeframe? -> {ok, why} (why = tooltip). */
+export function rangeState(tf, key) {
+  const label = TF_LABEL[tf] || tf;
+  const days = (RANGES.find(([k]) => k === key) || [key, 0])[1];
+  if (key === 'MAX') return { ok: true, why: `All available ${label.toLowerCase()} history (${TF_LIMIT_TEXT[tf] || 'max'})` };
+  if ((tf === '1d' && key === '1D') || (tf === '1wk' && ['1D', '5D', '1M'].includes(key))) {
+    return { ok: false, why: `Too short for ${label.toLowerCase()} candles - pick a shorter timeframe` };
+  }
+  if (days > (TF_HISTORY_DAYS[tf] ?? Infinity) + 1) {
+    const src = ['10m', '20m', '30m'].includes(tf) ? ' (built from 5-minute candles)' : tf === '5h' ? ' (built from 1-hour candles)' : '';
+    return { ok: false, why: `${label} data only goes back ${TF_LIMIT_TEXT[tf]}${src}` };
+  }
+  return { ok: true, why: `Show the last ${key === '1D' ? 'session' : key === '5D' ? '5 sessions' : key}` };
+}
+
+/** Row of range buttons. onPick(key); `extra` = [{key, label, title}] shown first (e.g. "Trade"). el.set(tf, active). */
+export function rangeBar(onPick, { extra = [] } = {}) {
+  const root = h('div', { class: 'seg sm range-bar', role: 'group', 'aria-label': 'Date range' });
+  root.set = (tf, active) => {
+    const items = [...extra.map((x) => ({ key: x.key, label: x.label, ok: true, why: x.title || null })),
+      ...RANGES.map(([k]) => ({ key: k, label: k, ...rangeState(tf, k) }))];
+    root.replaceChildren(...items.map((it) => h('span', { class: 'rb', title: it.why },
+      h('button', { type: 'button', class: [it.key === active && 'on'], disabled: !it.ok, 'aria-pressed': String(it.key === active),
+        onclick: () => onPick(it.key) }, it.label))));
+  };
+  return root;
+}
+
+// ------------------------------------------------------------------ indicators (computed on the merged bars)
+const round2 = (v) => Math.round(v * 100) / 100;
+
+export function emaSeries(bars, n) {
+  const out = [];
+  const k = 2 / (n + 1);
+  let e = null;
+  for (let i = 0; i < bars.length; i++) {
+    const c = bars[i].close;
+    e = e === null ? c : c * k + e * (1 - k);
+    if (i >= n - 1) out.push({ time: bars[i].time, value: round2(e) });
+  }
+  return out;
+}
+
+/** Session VWAP (reset each IST day; chart times are IST wall-clock epochs). */
+export function vwapSeries(bars) {
+  const out = [];
+  let day = null; let pv = 0; let vol = 0;
+  for (const b of bars) {
+    const d = Math.floor(b.time / 86400);
+    if (d !== day) { day = d; pv = 0; vol = 0; }
+    const v = Number.isFinite(b.volume) ? b.volume : 0;
+    pv += ((b.high + b.low + b.close) / 3) * v;
+    vol += v;
+    if (vol > 0) out.push({ time: b.time, value: round2(pv / vol) });
+  }
+  return out;
+}
+
+const markerKey = (m) => `${m.time}|${m.kind}|${m.text}`;
+
+/** Candlestick chart with volume, EMA9/EMA21/VWAP overlays, markers, price lines and lazy scroll-back history.
+ *
+ * setData() replaces everything; prepend() merges an older page (the view does not jump); mergeLatest() merges a
+ * refresh of the newest bars. Indicators are recomputed on the merged bars so they stay continuous. */
 export class CandleChart {
   constructor(container, { intraday = true } = {}) {
     this.container = container;
@@ -59,9 +141,21 @@ export class CandleChart {
     this.toggles = { ema9: true, ema21: true, vwap: true, volume: true };
     this.priceLines = [];
     this.payload = null;
+    this.bars = [];
+    this.markers = [];
+    this.lines = [];
+    this.extraLines = [];
+    this.markerFilter = null;
+    this.hasMore = false;
+    this.historyNote = '';
+    this.gen = 0;
+    this.loadingOlder = false;
+    this.fetchOlder = null;
+    this.olderBlockedUntil = 0;
     this.legend = h('div', { class: 'chart-legend' });
     this.msg = h('div', { class: 'chart-msg' });
-    container.append(this.legend, this.msg);
+    this.edge = h('div', { class: 'chart-edge', hidden: true, role: 'status' });
+    container.append(this.legend, this.msg, this.edge);
     this.ready = ensureCharts().then((LC) => this._init(LC));
   }
 
@@ -81,12 +175,14 @@ export class CandleChart {
     this.ema21 = line(c.ema21);
     this.vwap = line(c.vwap);
     this.chart.subscribeCrosshairMove((p) => this._legend(p));
-    if (this.payload) this.setData(this.payload, { keepRange: false });
+    this.chart.timeScale().subscribeVisibleLogicalRangeChange((r) => this._onRange(r));
+    this._applyVisibility();
+    if (this.payload) this._render({ fit: true });
   }
 
   _legend(param) {
     const bar = param && param.time !== undefined ? param.seriesData.get(this.candles) : null;
-    const last = this.payload?.candles?.[this.payload.candles.length - 1];
+    const last = this.bars[this.bars.length - 1];
     const b = bar || last;
     this.legend.replaceChildren();
     if (!b) return;
@@ -106,41 +202,177 @@ export class CandleChart {
   setIntraday(intraday) {
     this.intraday = intraday;
     this.chart?.applyOptions({ timeScale: { timeVisible: intraday } });
+    this._applyVisibility();
   }
 
   setToggles(t) {
     Object.assign(this.toggles, t);
+    this._applyVisibility();
+  }
+
+  _applyVisibility() {
     if (!this.chart) return;
     this.ema9.applyOptions({ visible: !!this.toggles.ema9 });
     this.ema21.applyOptions({ visible: !!this.toggles.ema21 });
-    this.vwap.applyOptions({ visible: !!this.toggles.vwap });
+    this.vwap.applyOptions({ visible: !!this.toggles.vwap && this.intraday });
     this.volume.applyOptions({ visible: !!this.toggles.volume });
   }
 
-  /** payload = /api/candles response; extraLines = [{price, kind, title}] drawn on top. */
-  setData(payload, { keepRange = true, extraLines = null, markerFilter = null } = {}) {
+  /** Replace everything. payload = /api/candles response; extraLines = [{price, kind, title}] drawn on top.
+   * fit: true/false overrides the default (fit when !keepRange or nothing was shown before). */
+  setData(payload, { keepRange = true, extraLines = null, markerFilter = null, fit = null } = {}) {
+    const prevLen = this.bars.length;
+    this.gen += 1;
+    this.loadingOlder = false;
+    this.olderBlockedUntil = 0;
+    this.settleUntil = Date.now() + 700;   // the caller positions the view now; no scroll-back for that transient range
     this.payload = payload;
+    this.bars = (payload.candles || []).slice();
+    this.markers = (payload.markers || []).slice();
+    this.lines = payload.lines || [];
+    this.extraLines = extraLines || [];
+    this.markerFilter = markerFilter;
+    this.hasMore = !!payload.has_more;
+    this.historyNote = payload.history_note || '';
+    if (payload.intraday !== undefined) this.intraday = !!payload.intraday;
+    this._render({ fit: fit === null ? (!keepRange || prevLen === 0) : !!fit });
+  }
+
+  /** Merge an older page (bars before the first loaded one). Returns the number of bars added. */
+  prepend(payload) {
+    const first = this.bars.length ? this.bars[0].time : Infinity;
+    const older = (payload.candles || []).filter((b) => b.time < first);
+    this.hasMore = !!payload.has_more && older.length > 0;
+    if (payload.history_note) this.historyNote = payload.history_note;
+    if (!older.length) { this._edgeState(); return 0; }
+    const ts = this.chart?.timeScale();
+    const lr = ts?.getVisibleLogicalRange();
+    this.bars = older.concat(this.bars);
+    const seen = new Set(this.markers.map(markerKey));
+    this.markers = (payload.markers || []).filter((m) => m.time < first && !seen.has(markerKey(m))).concat(this.markers);
+    this._render({ fit: false });
+    if (ts && lr) ts.setVisibleLogicalRange({ from: lr.from + older.length, to: lr.to + older.length });
+    return older.length;
+  }
+
+  /** Merge a refresh of the newest bars (replaces bars/markers from its first bar on; keeps older history). */
+  mergeLatest(payload, { extraLines = null } = {}) {
+    const fresh = payload.candles || [];
+    if (extraLines) this.extraLines = extraLines;
+    this.lines = payload.lines || this.lines;
+    this.payload = { ...payload, has_more: this.hasMore };
+    if (fresh.length) {
+      const cut = fresh[0].time;
+      if (!this.bars.length || cut <= this.bars[0].time) {
+        this.bars = fresh.slice();
+        this.markers = (payload.markers || []).slice();
+      } else {
+        this.bars = this.bars.filter((b) => b.time < cut).concat(fresh);
+        this.markers = this.markers.filter((m) => m.time < cut).concat(payload.markers || []);
+      }
+    }
+    this._render({ fit: false });
+  }
+
+  _render({ fit = false } = {}) {
     if (!this.chart) return;
     const c = themeColors();
-    const candles = payload.candles || [];
-    const prevLen = this._len || 0;
-    this.candles.setData(candles);
-    this.volume.setData(candles.map((b, i) => ({ time: b.time, value: b.volume,
-      color: (i > 0 ? b.close >= candles[i - 1].close : b.close >= b.open) ? c.volUp : c.volDown })));
-    this.ema9.setData(payload.ema9 || []);
-    this.ema21.setData(payload.ema21 || []);
-    this.vwap.setData(payload.vwap || []);
-    this.setToggles({ vwap: this.toggles.vwap && !!payload.vwap });
+    const bars = this.bars;
+    this.candles.setData(bars);
+    this.volume.setData(bars.map((b, i) => ({ time: b.time, value: b.volume,
+      color: (i > 0 ? b.close >= bars[i - 1].close : b.close >= b.open) ? c.volUp : c.volDown })));
+    this.ema9.setData(emaSeries(bars, 9));
+    this.ema21.setData(emaSeries(bars, 21));
+    this.vwap.setData(this.intraday ? vwapSeries(bars) : []);
+    this._applyVisibility();
     const colors = MARKER_COLOR(c);
-    let markers = (payload.markers || []);
-    if (markerFilter) markers = markers.filter(markerFilter);
+    const times = new Set(bars.map((b) => b.time));
+    let markers = this.markers.filter((m) => times.has(m.time));
+    if (this.markerFilter) markers = markers.filter(this.markerFilter);
+    markers.sort((a, b) => a.time - b.time);
     this.candles.setMarkers(markers.map((m) => ({ time: m.time, position: m.position, shape: m.shape,
       color: colors[m.color] || c.accent, text: m.text, size: 1 })));
-    this.setLines([...(payload.lines || []), ...(extraLines || [])]);
-    this._len = candles.length;
-    this.setMessage(candles.length ? '' : 'No candles for this symbol / timeframe yet.');
-    if (!keepRange || prevLen === 0) this.chart.timeScale().fitContent();
+    this.setLines([...(this.lines || []), ...(this.extraLines || [])]);
+    this.setMessage(bars.length ? '' : 'No candles for this symbol / timeframe yet.');
+    if (fit) this.chart.timeScale().fitContent();
     this._legend(null);
+    this._edgeState();
+  }
+
+  /** Fit everything loaded. */
+  fit() { this.chart?.timeScale().fitContent(); }
+
+  /** Show the newest part of the data: 'session' = the last session (two if it has < 20 bars) or N days. */
+  showRecent(span) {
+    const n = this.bars.length;
+    if (!this.chart || !n) return;
+    let from = 0;
+    const dayOf = (i) => Math.floor(this.bars[i].time / 86400);
+    if (span === 'session') {
+      let i = n - 1;
+      const back = (d) => { while (i > 0 && dayOf(i - 1) === d) i -= 1; };
+      back(dayOf(n - 1));
+      if (n - i < 20 && i > 0) { i -= 1; back(dayOf(i)); }
+      from = i;
+    } else if (f.isNum(span)) {
+      const cutoff = this.bars[n - 1].time - span * 86400;
+      from = Math.max(0, this.bars.findIndex((b) => b.time >= cutoff));
+    }
+    this.chart.timeScale().setVisibleLogicalRange({ from: from - 0.5, to: n - 1 + 4 });
+  }
+
+  /** Lazy scroll-back: fetchOlder(beforeChartTime) -> Promise</api/candles page>. */
+  enableHistory(fetchOlder) { this.fetchOlder = fetchOlder; }
+
+  /** A new symbol / timeframe / range is being loaded: drop any in-flight older page and stop paging. */
+  resetHistory() { this.gen += 1; this.loadingOlder = false; this.hasMore = false; this._edgeState(); }
+
+  _onRange(r) {
+    this._edgeState(r);
+    if (!r || !this.bars.length || !this.fetchOlder || !this.hasMore || this.loadingOlder) return;
+    if (r.from > 12 || Date.now() < this.olderBlockedUntil || Date.now() < (this.settleUntil || 0)) return;
+    this._loadOlder();
+  }
+
+  async _loadOlder() {
+    const gen = this.gen;
+    this.loadingOlder = true;
+    this._edgeState();
+    try {
+      const d = await this.fetchOlder(this.bars[0].time);
+      if (gen !== this.gen || this.destroyed) return;
+      this.loadingOlder = false;
+      this.prepend(d);
+    } catch (err) {
+      if (gen !== this.gen || this.destroyed) return;
+      this.loadingOlder = false;
+      this.olderBlockedUntil = Date.now() + 10000;
+      this.edge.textContent = `Could not load older candles: ${err?.message || err}`;
+      this.edge.className = 'chart-edge warn';
+      this.edge.hidden = false;
+    } finally {
+      if (gen === this.gen) this.loadingOlder = false;
+    }
+  }
+
+  _edgeState(range) {
+    if (this.destroyed) return;
+    const r = range || this.chart?.timeScale().getVisibleLogicalRange();
+    if (this.loadingOlder) {
+      this.edge.textContent = 'Loading older candles…';
+      this.edge.className = 'chart-edge';
+      this.edge.hidden = false;
+      return;
+    }
+    if (this.edge.classList.contains('warn') && Date.now() < this.olderBlockedUntil) return;
+    const atStart = r && this.bars.length && r.from <= 0.5 && !this.hasMore;
+    if (atStart) {
+      this.edge.textContent = `Start of available history${this.historyNote ? ` (${this.historyNote})` : ''}`;
+      this.edge.className = 'chart-edge info';
+      this.edge.hidden = false;
+    } else {
+      this.edge.hidden = true;
+    }
   }
 
   setLines(lines) {
@@ -165,11 +397,12 @@ export class CandleChart {
     this.ema9.applyOptions({ color: c.ema9 });
     this.ema21.applyOptions({ color: c.ema21 });
     this.vwap.applyOptions({ color: c.vwap });
-    if (this.payload) this.setData(this.payload, { keepRange: true });
+    if (this.payload) this._render({ fit: false });
   }
 
   destroy() {
     this.destroyed = true;
+    this.gen += 1;
     if (this.chart) this.chart.remove();
     this.chart = null;
   }

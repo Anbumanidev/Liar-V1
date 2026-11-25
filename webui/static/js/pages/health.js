@@ -5,12 +5,14 @@ import { h, icon, debounce } from '../dom.js';
 import * as f from '../format.js';
 import * as ui from '../ui.js';
 import { pageTimers } from '../router.js';
+import { getScope } from '../scope.js';
 
 export const title = 'Health & logs';
 
 export function mount(root, params) {
   const t = pageTimers();
-  let day = params.date || f.todayIST();
+  const scopeDay = () => (getScope().kind === 'today' ? getScope().date : f.todayIST());
+  let day = params.date || scopeDay();
   const dateIn = h('input', { type: 'date', class: 'input sm', value: day, max: f.todayIST(), 'aria-label': 'Day' });
   const engineCard = ui.card('Engine', { body: ui.skeleton(4) });
   const findingsCard = ui.card('Findings & recommended actions', { body: ui.skeleton(3) });
@@ -85,7 +87,7 @@ export function mount(root, params) {
 
   // ------------------------------------------------------------------ log viewer
   const fileSel = h('select', { class: 'input sm', 'aria-label': 'Log file' },
-    ['engine', 'errors', 'decisions', 'orders', 'trades', 'risk', 'scans', 'agents', 'debates', 'approvals', 'control', 'capital', 'shadow', 'audit', 'web']
+    ['engine', 'activity', 'errors', 'decisions', 'orders', 'trades', 'risk', 'scans', 'agents', 'debates', 'approvals', 'control', 'capital', 'shadow', 'audit', 'web']
       .map((x) => h('option', { value: x }, x === 'engine' ? 'engine.log' : x === 'web' ? 'web.log' : `${x}.jsonl`)));
   const linesSel = h('select', { class: 'input sm', 'aria-label': 'Lines' }, [100, 200, 500, 1000].map((n) => h('option', { value: n, selected: n === 200 }, `${n} lines`)));
   const levelSel = h('select', { class: 'input sm', 'aria-label': 'Level' }, h('option', { value: '' }, 'All levels'),
@@ -142,6 +144,7 @@ export function mount(root, params) {
     while (logbox.children.length > 2000) logbox.firstChild.remove();
     if (autoScroll) logbox.scrollTop = logbox.scrollHeight;
   }));
+  t.track(on('scope', () => { const d = scopeDay(); if (d !== day) { day = d; dateIn.value = d; load(); loadLogs(); } }));
   t.every(30000, () => { if (day === f.todayIST()) load(); });
   t.every(15000, () => { if (live && fileSel.value !== 'engine' && day === f.todayIST()) loadLogs(); });
   const onRefresh = () => { load(); loadLogs(); };

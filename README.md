@@ -118,6 +118,22 @@ The engine and dashboard are **separate processes**. The dashboard only writes `
 and settings versions. The engine polls those every 2–5 s, executes them, and writes the results
 and its heartbeat back.
 
+**What is the engine doing?** It says so, in the terminal and on the dashboard's **Live log**:
+* on start and whenever it changes (at least every 10 min), one status line, e.g.
+  `idle - intraday scans run 09:30-14:45 (over for today); next: eod at 15:30; next scan:
+  swing_scan at 16:00`. Starting the engine after 14:45 is fine, it simply waits for the next job;
+* every job start / finish, every stock screened (setup or not), each AI agent call (model,
+  answer, seconds), the debate result, the meta decision, the risk verdict and what happened.
+
+The same feed is written to `logs/<day>/activity.jsonl`. **Scan now** (dashboard, any time of
+day) screens a mode's watchlist and runs the AI on the best setups. It is analysis only and never
+trades. Analyze now / Scan now run on a background worker, so stop-losses keep being monitored
+while the AI thinks.
+
+> **Why so few INTRADAY candidates with ₹1,000?** One share must fit the INTRADAY allocation
+> (50 % = ₹500), so only NIFTY 50 stocks priced under ~₹500 make the watchlist (about 10). More
+> capital, a higher INTRADAY allocation, or a wider universe (NIFTY100) gives more setups.
+
 Other commands:
 
 ```powershell
@@ -135,6 +151,41 @@ python main.py upgrade-settings              # apply recommended settings as one
 **After every trading day:** run `python main.py postmortem` and `python main.py diagnose` (or open
 Today and Health on the web dashboard). They read the database, candles and logs and tell you what
 happened in plain language.
+
+### End-of-day plan for the next session
+* **15:40** (`next_day_plan`, after the close): every NIFTY 100 stock (`engine.next_day_universe`)
+  is ranked on its daily chart for the next session. Each candidate gets a trigger, stop, target
+  (2R), a 0–100 score and plain-language reasons, and is flagged when it's too expensive for the
+  current capital. Setups:
+  * **BREAKOUT** (long): uptrend, close near the 20-day high, quiet/narrow day.
+  * **PULLBACK** (long): uptrend, dip to EMA20 that held.
+  * **BREAKDOWN** (short, intraday only): downtrend near the 20-day low.
+
+  The best 10 with score ≥ 55 are saved as the list "Plan 26 Nov 2026" and sent in the **15:45 EOD
+  e-mail**.
+* **09:20** (`opening_check`): each plan stock is checked against the opening price:
+  * gapped more than 1 ATR past its trigger → INVALIDATED (don't chase);
+  * already through its stop → INVALIDATED;
+  * already past its trigger → TRIGGERED;
+  * otherwise → ACTIVE (waiting).
+* **During the session:** INTRADAY cycles analyse the plan's ACTIVE/TRIGGERED stocks first, then
+  the usual ranked watchlist. Each one still needs a 5-minute setup, the AI agents and every
+  risk-manager rule; the plan's daily levels are context, not orders.
+
+Score = 25 × trend + 20 × relative strength vs NIFTY + 20 × range compression + 15 × volume +
+10 × proximity to the trigger + 10 × liquidity (each part 0–1; details in
+`strategies/next_day.py`).
+
+### Follow-up lists
+* Any stock you analyse can be added to a list ("Add to follow-up" on decisions, charts, trades,
+  scan results). Create as many lists as you like; rename them, delete them, or remove single
+  stocks.
+* Each row shows the live price, the change since you added it, and the latest analysis.
+* **Scan this list now** analyses every stock in it (analysis only, nothing is traded).
+* **Use for trading** makes INTRADAY cycles analyse that list first. Every trade still needs the
+  risk manager.
+
+The lists are your own data, so the dashboard saves them directly (every change is audited).
 
 ### Batches and funding (start every batch from ₹1,000)
 * A batch is one experiment with its own capital. `new-batch` (or Batches → Start new batch on the
@@ -264,6 +315,26 @@ Each is a deterministic rule with its own code, applies to system trades, and ca
 | `NO_ROOM` | the nearest resistance/support is less than 1R from the entry | 1R |
 | `REENTRY_COOLDOWN` | the same symbol hit its stop recently | INTRADAY 60 min |
 | fill check | at the actual paper fill: R:R to T1 < 1.0, or the stop is < 0.8 ATR away → entry skipped | on |
+| `CHASING_HIGH` | buying in the top 20 % of the day's range when stretched (> 2.5 ATR above VWAP) or after the day already moved its normal daily range; on such an exhausted day, any long above 60 % of the range (shorts mirrored) | on |
+| `HISTORY_FADES` | the stock's own last 20 sessions: when it reached the top of a big range, under 35 % of those moves went on to +1.5R before −1R (at least 6 sessions) | on |
+
+**Price behaviour before every entry** (`features/price_behaviour.py`). Each INTRADAY/BTST
+decision, and each approval at the moment you approve it, gets a snapshot:
+* where the price sits in today's range;
+* how much of a normal day's move is already done;
+* distance from VWAP in ATRs, the gap, and the previous day's high/low/close;
+* the stock's own record: what happened next on its recent days when it reached the top of a
+  big range.
+
+It's shown in the Live log, on each decision and on Trade detail. Measured on the 2026-11-25
+losers:
+
+| Trade | Where in the day's range | Day's move already made | How such moves ended for this stock |
+|---|---|---|---|
+| ITC | 86 % | 168 % of normal, 3.3 ATR above VWAP | — |
+| BEL (both) | 72–73 % | 112 % of normal | 0 % of 8 past moves continued |
+
+All three would now be refused. The post-mortem flags such entries as `BOUGHT_HIGH`.
 
 INTRADAY entries also skip the midday lull: windows are 09:30–11:45 and 13:15–14:45. Each
 cycle screens every symbol deterministically first, then sends only the best 2 setups (by

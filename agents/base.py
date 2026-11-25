@@ -34,6 +34,7 @@ from agents.schemas import (
     truncate_list,
     truncate_text,
 )
+from core.activity import activity
 from core.enums import AgentStatus, Direction, Mode, Signal, Timeframe
 from core.logging import to_jsonable
 from core.types import AgentReport, StockContext, StrategySignal
@@ -365,10 +366,25 @@ class SubAgent(ABC):
             tpl = prompts.get(self.name, pinned)
             meta = {"model": model, "prompt_version": tpl.version}
             system, user = prompts.render_prompt(tpl, **self.prompt_vars(ctx, payload, settings))
+            activity("llm", f"{ctx.symbol} {ctx.mode.value}: {self.name} agent asking {model} ...", level="debug",
+                     symbol=ctx.symbol, mode=ctx.mode.value, agent=self.name, model=model, event="start")
             res = llm.generate(
                 self.name, model, system, user, self.OutputModel,
                 temperature=settings.models.temperature, think=False,
             )
+            if res.ok and res.parsed is not None:
+                sig = getattr(res.parsed, "signal", None)
+                conf = getattr(res.parsed, "confidence", None)
+                activity("llm", f"{ctx.symbol} {ctx.mode.value}: {self.name} -> {getattr(sig, 'value', sig) or 'done'}"
+                                f"{f' {conf}' if conf is not None else ''} ({_ms() / 1000:.1f}s, {res.model or model})",
+                         symbol=ctx.symbol, mode=ctx.mode.value, agent=self.name, model=res.model or model,
+                         event="done", status="OK", signal=getattr(sig, "value", sig), confidence=conf,
+                         latency_ms=_ms())
+            elif not res.skipped:
+                activity("llm", f"{ctx.symbol} {ctx.mode.value}: {self.name} FAILED after {_ms() / 1000:.0f}s - "
+                                f"{(res.error or '')[:120]}", level="warning", symbol=ctx.symbol, mode=ctx.mode.value,
+                         agent=self.name, model=model, event="done", status="FAILED", latency_ms=_ms(),
+                         error=(res.error or "")[:300])
             meta = {
                 "model": res.model or model, "prompt_version": tpl.version, "tokens_in": res.tokens_in,
                 "tokens_out": res.tokens_out, "data_used": payload,

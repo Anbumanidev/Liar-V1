@@ -1,20 +1,18 @@
 // Trades journal: every completed trade across batches, filters, totals and CSV export.
-import { api, qs } from '../api.js';
+import { api, on, qs } from '../api.js';
 import { h, icon, debounce } from '../dom.js';
 import * as f from '../format.js';
 import * as ui from '../ui.js';
 import { go, pageTimers } from '../router.js';
 import { tradeColumns } from './today.js';
+import { scopeParams, scopeLabel } from '../scope.js';
 
 export const title = 'Trades journal';
 
 export function mount(root, params) {
   const t = pageTimers();
-  const st = { batch_id: params.batch_id || '', from: params.from || '', to: params.to || '', mode: params.mode || '',
-    result: params.result || '', symbol: params.symbol || '' };
-  const batchSel = h('select', { class: 'input sm', 'aria-label': 'Batch' }, h('option', { value: '' }, 'All batches'));
-  const fromIn = h('input', { type: 'date', class: 'input sm', value: st.from, 'aria-label': 'From date' });
-  const toIn = h('input', { type: 'date', class: 'input sm', value: st.to, 'aria-label': 'To date' });
+  const st = { mode: params.mode || '', result: params.result || '', symbol: params.symbol || '' };
+  const scopeTag = h('span', { class: 'scope-tag' });
   const modeSel = h('select', { class: 'input sm', 'aria-label': 'Mode' }, h('option', { value: '' }, 'All modes'),
     ['INTRADAY', 'BTST', 'SWING', 'POSITIONAL'].map((m) => h('option', { value: m, selected: st.mode === m }, m)));
   const resSel = h('select', { class: 'input sm', 'aria-label': 'Result' }, h('option', { value: '' }, 'All results'),
@@ -27,30 +25,26 @@ export function mount(root, params) {
   let rows = [];
 
   const filters = h('div', { class: 'row' },
-    h('label', { class: 'field' }, h('span', null, 'Batch'), batchSel),
-    h('label', { class: 'field' }, h('span', null, 'From'), fromIn),
-    h('label', { class: 'field' }, h('span', null, 'To'), toIn),
+    h('div', { class: 'field' }, h('span', null, 'Scope (top bar)'), h('div', { class: 'scope-tag' }, scopeTag)),
     h('label', { class: 'field' }, h('span', null, 'Mode'), modeSel),
     h('label', { class: 'field' }, h('span', null, 'Result'), resSel),
     h('label', { class: 'field' }, h('span', null, 'Symbol'), symIn),
     h('div', { class: 'field' }, h('span', null, ' '), h('div', { class: 'row' },
-      h('button', { class: 'btn sm ghost', onclick: () => { Object.keys(st).forEach((k) => { st[k] = ''; }); for (const el of [fromIn, toIn, symIn]) el.value = ''; batchSel.value = ''; modeSel.value = ''; resSel.value = ''; load(); } }, 'Reset'),
+      h('button', { class: 'btn sm ghost', onclick: () => { st.mode = ''; st.result = ''; st.symbol = ''; symIn.value = ''; modeSel.value = ''; resSel.value = ''; load(); } }, 'Reset'),
       csvBtn)));
-  root.append(h('div', { class: 'page-head' }, h('h1', null, 'Trades journal'), h('span', { class: 'sub' }, 'all completed trades across batches')),
+  root.append(h('div', { class: 'page-head' }, h('h1', null, 'Trades journal'), h('span', { class: 'sub' }, 'completed trades for the selected scope')),
     ui.card(null, { body: filters }), summary, tableCard);
 
-  const read = () => {
-    st.batch_id = batchSel.value; st.from = fromIn.value; st.to = toIn.value; st.mode = modeSel.value; st.result = resSel.value;
-    st.symbol = symIn.value.trim().toUpperCase();
-  };
+  const read = () => { st.mode = modeSel.value; st.result = resSel.value; st.symbol = symIn.value.trim().toUpperCase(); };
+  let seq = 0;
   const load = async () => {
     read();
+    const my = ++seq;
+    scopeTag.replaceChildren(h('b', null, scopeLabel()));
     try {
-      const d = await api.get('/api/trades' + qs({ ...st, limit: 2000 }));
+      const d = await api.get('/api/trades' + qs({ ...scopeParams(), mode: st.mode, result: st.result, symbol: st.symbol, limit: 2000 }));
+      if (my !== seq) return;
       rows = d.rows;
-      if (batchSel.options.length <= 1) {
-        for (const b of d.batches) batchSel.appendChild(h('option', { value: String(b.id), selected: String(b.id) === String(st.batch_id) }, `${b.name} (${b.status})`));
-      }
       const tt = d.totals;
       const cell = (label, value, sub = null) => h('div', { class: 'cell' }, h('div', { class: 'label' }, label), h('div', { class: 'value' }, value),
         sub ? h('div', { class: 'sub' }, sub) : null);
@@ -66,15 +60,16 @@ export function mount(root, params) {
         onRow: (r) => go(`/trade/${r.position_id}`), tall: true,
         footer: rows.length ? { symbol: 'Total', gross: ui.money(tt.gross), charges: f.inr(tt.charges), net: h('b', null, ui.money(tt.net)),
           r_multiple: f.isNum(tt.avg_r) ? `avg ${f.rmult(tt.avg_r)}` : '' } : null,
-        empty: ui.empty('No trades match these filters', 'Completed trades show here once positions close.', 'trades') }));
+        empty: ui.empty('No trades match', 'Change the scope in the top bar (Today / Batch / Overall) or the filters above.', 'trades') }));
     } catch (err) {
-      tableCard.body.replaceChildren(ui.errorBox(err));
+      if (my === seq) tableCard.body.replaceChildren(ui.errorBox(err));
     }
   };
   const later = debounce(load, 350);
-  for (const el of [batchSel, fromIn, toIn, modeSel, resSel]) el.addEventListener('change', load);
+  for (const el of [modeSel, resSel]) el.addEventListener('change', load);
   symIn.addEventListener('input', later);
   csvBtn.addEventListener('click', () => exportCsv(rows));
+  t.track(on('scope', load));
   const onRefresh = () => load();
   window.addEventListener('page:refresh', onRefresh);
   t.track(() => window.removeEventListener('page:refresh', onRefresh));

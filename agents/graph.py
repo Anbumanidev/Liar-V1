@@ -47,6 +47,7 @@ from core.enums import (
     TradeDecision,
     TradeSource,
 )
+from core.activity import activity
 from core.errors import DataUnavailableError
 from core.logging import log_event, to_jsonable
 from core.types import (
@@ -284,7 +285,7 @@ class AnalysisPipeline:
     # ------------------------------------------------------------------ two-phase cycle
 
     def screen(self, symbol: str, mode: Mode, *, batch_id: int, run_id: int | None = None,
-               check_timing: bool = True) -> "ScreenHandle":
+               check_timing: bool = True, route: bool = True) -> "ScreenHandle":
         """Phase 1 of a cycle: data + deterministic strategies + confluence only (no LLM).
 
         Setups that fail the pre-filter finish here (persisted as FILTERED, shadow-tracked) and
@@ -296,7 +297,7 @@ class AnalysisPipeline:
         sym = symbol.strip().upper()
         m = Mode(mode)
         state: PipelineState = {"symbol": sym, "mode": m.value, "batch_id": batch_id, "run_id": run_id,
-                                "force": False, "route": True, "check_timing": check_timing, "started": t0}
+                                "force": False, "route": route, "check_timing": check_timing, "started": t0}
         cfg = {"configurable": {"thread_id": f"screen:{run_id}:{sym}:{m.value}:{to_ist(self.s.clock.now()).isoformat()}"},
                "recursion_limit": 25}
         try:
@@ -313,9 +314,21 @@ class AnalysisPipeline:
             return ScreenHandle(symbol=sym, mode=m, cfg=cfg, t0=t0, result=res)
         if snap.next and "agents" in snap.next:
             conf = snap.values.get("confluence")
+            best = snap.values.get("best")
+            activity("screen", f"{sym} {m.value}: setup {best.strategy if best else '?'} "
+                               f"{best.direction.value if best else ''} entry {best.entry_price if best else '?'} "
+                               f"SL {best.stop_loss if best else '?'} T1 {best.target_1 if best else '?'} - confluence "
+                               f"{conf.score if conf else 0:.1f} ({conf.grade.value if conf else '?'})",
+                     clock=self.s.clock, symbol=sym, mode=m.value, result="candidate",
+                     strategy=best.strategy if best else None, direction=best.direction.value if best else None,
+                     confluence=conf.score if conf else None, grade=conf.grade.value if conf else None)
             return ScreenHandle(symbol=sym, mode=m, cfg=cfg, t0=t0, confluence=conf.score if conf else 0.0)
         self._forget(self._screen_graph, cfg)
-        return ScreenHandle(symbol=sym, mode=m, cfg=cfg, t0=t0, result=self._result(sym, m, out, t0))
+        res = self._result(sym, m, out, t0)
+        reason = res.filtered_reason or res.error or res.final_action
+        activity("screen", f"{sym} {m.value}: {reason}", clock=self.s.clock, level="debug", symbol=sym,
+                 mode=m.value, result="no_setup" if reason == "no strategy setup" else "filtered", reason=reason)
+        return ScreenHandle(symbol=sym, mode=m, cfg=cfg, t0=t0, result=res)
 
     def resume(self, handle: "ScreenHandle", *, skip_reason: str | None = None) -> PipelineResult:
         """Phase 2: run the LLM agents for a screened setup, or file it as FILTERED. Never raises."""
@@ -467,9 +480,19 @@ class AnalysisPipeline:
         s = self.s
         ctx = st["ctx"]
         mcfg = s.settings.mode(ctx.mode)
+        tag = f"{ctx.symbol} {ctx.mode.value}"
+        if getattr(s.llm, "backend", None) != "rules":
+            activity("agents", f"{tag}: 10 specialist agents analysing on {s.settings.models.model_for('technical')} "
+                               f"({s.settings.models.max_concurrent_requests} at a time) ...", clock=s.clock,
+                     symbol=ctx.symbol, mode=ctx.mode.value)
+        t0 = time.perf_counter()
         reports = run_sub_agents(ctx, s.settings, s.llm, s.prompts, s.settings.engine.max_parallel_agents,
                                  clock=s.clock)
         vote = weighted_vote(reports, mcfg.agent_weights)
+        activity("agents", f"{tag}: agents done in {time.perf_counter() - t0:.0f}s - {vote.bullish} bullish, "
+                           f"{vote.bearish} bearish, {vote.neutral - vote.failed - vote.skipped} neutral, "
+                           f"{vote.failed} failed; weighted vote {vote.score:+.0f}", clock=s.clock,
+                 level="warning" if vote.failed else "info", symbol=ctx.symbol, mode=ctx.mode.value)
         conf = compute_confluence(ctx.features, ctx.market, st.get("best"), ctx.mode, mcfg,
                                   sentiment=ctx.sentiment_score, fundamental_score=vote.fundamental_score,
                                   event_risk=bool(vote.event_risk))
@@ -480,14 +503,43 @@ class AnalysisPipeline:
         from agents.debate.debate import run_debate
 
         s = self.s
-        return {"debate": run_debate(st["ctx"], st.get("reports", []), st.get("vote"), s.settings, s.llm, s.prompts)}
+        ctx = st["ctx"]
+        if getattr(s.llm, "backend", None) != "rules":
+            activity("debate", f"{ctx.symbol} {ctx.mode.value}: bull vs bear debate on "
+                               f"{s.settings.models.model_for('bull')} ...", clock=s.clock, level="debug",
+                     symbol=ctx.symbol, mode=ctx.mode.value, agent="debate", event="start",
+                     model=s.settings.models.model_for("bull"))
+        deb = run_debate(ctx, st.get("reports", []), st.get("vote"), s.settings, s.llm, s.prompts)
+        if deb.status == AgentStatus.OK and deb.bull is not None and deb.bear is not None:
+            verdict = ("bull case stronger" if deb.bull.conviction > deb.bear.conviction else
+                       "bear case stronger" if deb.bear.conviction > deb.bull.conviction else "tie")
+            activity("debate", f"{ctx.symbol} {ctx.mode.value}: bull {deb.bull.conviction} vs bear "
+                               f"{deb.bear.conviction} after {deb.rounds} round(s) - {verdict}", clock=s.clock,
+                     symbol=ctx.symbol, mode=ctx.mode.value, agent="debate", event="done",
+                     bull=deb.bull.conviction, bear=deb.bear.conviction, rounds=deb.rounds,
+                     latency_ms=deb.latency_ms)
+        else:
+            activity("debate", f"{ctx.symbol} {ctx.mode.value}: debate {deb.status.value}"
+                               + (f" - {deb.error}" if deb.error else ""), clock=s.clock, level="debug",
+                     symbol=ctx.symbol, mode=ctx.mode.value, agent="debate", event="done")
+        return {"debate": deb}
 
     def _node_meta(self, st: PipelineState) -> dict[str, Any]:
         from agents.meta.meta import run_meta
 
         s = self.s
-        meta = run_meta(st["ctx"], st.get("reports", []), st.get("vote"), st.get("debate"), s.settings, s.llm,
+        ctx = st["ctx"]
+        meta = run_meta(ctx, st.get("reports", []), st.get("vote"), st.get("debate"), s.settings, s.llm,
                         s.prompts, enabled_modes=s.settings.modes.enabled_modes())
+        if meta.decision == TradeDecision.NO_TRADE:
+            msg = f"{ctx.symbol} {ctx.mode.value}: meta decision NO TRADE - {meta.why_not or 'no reason given'}"
+        else:
+            msg = (f"{ctx.symbol} {ctx.mode.value}: meta decision {meta.decision.value} {meta.strategy or ''} "
+                   f"entry {meta.entry_price} SL {meta.stop_loss} T1 {meta.target_1} (confidence {meta.confidence})"
+                   " -> risk manager")
+        activity("meta", msg, clock=s.clock, symbol=ctx.symbol, mode=ctx.mode.value, agent="meta",
+                 decision=meta.decision.value, confidence=meta.confidence, strategy=meta.strategy,
+                 why_not=meta.why_not, latency_ms=meta.latency_ms)
         return {"meta": meta}
 
     def _atr_for_mode(self, symbol: str, mode: Mode, ctx: StockContext) -> float | None:
@@ -538,6 +590,14 @@ class AnalysisPipeline:
         bull = bear = None
         if debate is not None and debate.status == AgentStatus.OK and debate.bull is not None and debate.bear is not None:
             bull, bear = int(debate.bull.conviction), int(debate.bear.conviction)
+        beh = price_behaviour_for(s.data, ctx.symbol, mode, direction, s.clock.now(),
+                                  live_price=quote.ltp if quote and quote.ltp else float(meta.entry_price),
+                                  settings=s.settings)
+        if beh is not None:
+            activity("behaviour", f"{ctx.symbol} {mode.value}: " + "; ".join(beh["notes"][:4])
+                     + f" -> {beh['verdict']}", clock=s.clock, symbol=ctx.symbol, mode=mode.value,
+                     level="warning" if beh["verdict"] != "OK" else "info", verdict=beh["verdict"],
+                     range_pos=beh["range_pos"], range_vs_adr=beh["range_vs_adr"])
         proposal = TradeProposal(
             batch_id=st["batch_id"], symbol=ctx.symbol, mode=mode, direction=direction,
             entry_price=float(meta.entry_price), entry_type=meta.entry_type, stop_loss=float(meta.stop_loss),
@@ -553,6 +613,7 @@ class AnalysisPipeline:
             debate_bull=bull, debate_bear=bear,
             room_r=conf.room_r if conf is not None and mode == ctx.mode and signal is st.get("best") else None,
             ltp_at=quote.timestamp if quote else None,
+            **behaviour_fields(beh),
         )
         with self._session() as session:
             state = build_risk_state(session, batch_id=st["batch_id"], capital_manager=s.capital, clock=s.clock,
@@ -560,6 +621,13 @@ class AnalysisPipeline:
                                      correlation_lookback=s.settings.risk.correlation_lookback_days)
             session.rollback()
         verdict = s.risk.evaluate(proposal, state, check_timing=st.get("check_timing", True))
+        if verdict.approved:
+            msg = f"{ctx.symbol} {mode.value}: risk manager APPROVED qty {verdict.qty} (risk ₹{verdict.risk_amount or 0:.2f})"
+        else:
+            msg = f"{ctx.symbol} {mode.value}: risk manager REJECTED - {verdict.message}"
+        activity("risk", msg, clock=s.clock, level="success" if verdict.approved else "info", symbol=ctx.symbol,
+                 mode=mode.value, approved=verdict.approved, rule=verdict.rule.value if verdict.rule else None,
+                 qty=verdict.qty)
         return {"proposal": proposal, "verdict": verdict}
 
     def _node_persist(self, st: PipelineState) -> dict[str, Any]:
@@ -667,8 +735,8 @@ class AnalysisPipeline:
                         row.final_action = final
                 else:
                     reason = st.get("filtered_reason") or (meta.why_not if meta is not None else None)
-                    if not st.get("route", True):
-                        row.final_action = FINAL_ANALYZED
+                    if not st.get("route", True) and not st.get("filtered_reason"):
+                        row.final_action = FINAL_ANALYZED   # screened-out stocks stay FILTERED (funnel)
                     if best is not None and st.get("route", True) and s.shadow is not None:
                         source = RejectionSource.FILTER if st.get("filtered_reason") else RejectionSource.META
                         s.shadow.create(session, batch_id=st["batch_id"], symbol=st["symbol"],
@@ -679,6 +747,15 @@ class AnalysisPipeline:
                                         confidence=meta.confidence if meta is not None else None,
                                         entry_type=best.entry_type, max_holding_days=best.max_holding_days)
                 session.commit()
+                if proposal is not None and verdict is not None:
+                    explain = {"EXECUTED": "paper order sent", "QUEUED": "waiting for your approval",
+                               "SIGNAL_ONLY": "signal only (not traded)", "RISK_REJECTED": "not traded",
+                               "ANALYZED": "analysis only (not traded)"}.get(row.final_action, "")
+                    activity("route", f"{st['symbol']} {row.mode}: {row.final_action}"
+                                      + (f" - {explain}" if explain else ""), clock=s.clock,
+                             level="success" if row.final_action in ("EXECUTED", "QUEUED") else "info",
+                             symbol=st["symbol"], mode=row.mode, final_action=row.final_action,
+                             decision_id=decision_id)
                 return {"final_action": row.final_action}
             except Exception as exc:  # noqa: BLE001
                 session.rollback()
@@ -686,6 +763,34 @@ class AnalysisPipeline:
                              batch_id=st["batch_id"], clock=s.clock)
                 session.commit()
                 return {"final_action": FINAL_NO_TRADE, "error": f"route failed: {exc}"}
+
+
+#: Modes where the intraday price-behaviour check applies (entries during the session).
+BEHAVIOUR_MODES = frozenset({Mode.INTRADAY, Mode.BTST})
+
+
+def price_behaviour_for(data: Any, symbol: str, mode: Mode, direction: Direction, now: datetime, *,
+                        live_price: float | None, settings: Settings) -> dict[str, Any] | None:
+    """features.price_behaviour snapshot for INTRADAY / BTST decisions (None otherwise / on failure)."""
+    if Mode(mode) not in BEHAVIOUR_MODES or not settings.risk.behaviour_check_enabled or data is None:
+        return None
+    try:
+        from features.price_behaviour import compute
+
+        return compute(data, symbol, now, direction=Direction(direction).value, live_price=live_price,
+                       sessions=settings.risk.behaviour_sessions, thresholds=settings.risk)
+    except Exception as exc:  # noqa: BLE001 - advisory input: never block the pipeline
+        logger.warning(f"[pipeline] price behaviour {symbol}: {exc}")
+        return None
+
+
+def behaviour_fields(beh: dict[str, Any] | None) -> dict[str, Any]:
+    """TradeProposal fields from a behaviour snapshot (empty dict = rules skipped)."""
+    if not beh:
+        return {}
+    return {"range_pos": beh.get("range_pos"), "range_vs_adr": beh.get("range_vs_adr"),
+            "vwap_ext_atr": beh.get("vwap_ext_atr"), "continuation_rate": beh.get("continuation_rate"),
+            "behaviour_samples": beh.get("samples"), "behaviour": beh}
 
 
 def _feature_digest(ctx: StockContext | None) -> dict[str, Any] | None:

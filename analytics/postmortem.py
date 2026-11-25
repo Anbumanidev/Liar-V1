@@ -39,6 +39,12 @@ CATALOG: dict[str, tuple[str, str, str, str | None]] = {
     "TIGHT_STOP": ("high", "Stop-loss inside normal noise",
                    "Stops must sit at least ~0.8-1 ATR from the actual entry, beyond structure.",
                    "risk.sl_min_atr 0.3 -> 0.8 + fill check (skip fills too close to the stop)"),
+    "BOUGHT_HIGH": ("high", "Bought near the day's high in an already exhausted range",
+                    "Do not chase: no longs in the upper part of a day range that has already moved its normal "
+                    "daily distance (or far above VWAP), and skip stocks whose recent highs usually fade. "
+                    "Wait for a pullback toward VWAP / support, or the next session.",
+                    "risk rules CHASING_HIGH (no longs above 80% of the range when stretched, above 60% on an "
+                    "exhausted day) + HISTORY_FADES (the stock's own last 20 sessions)"),
     "AGENTS_FAILED": ("high", "Most LLM agents failed - an uninformed decision",
                       "Refuse trades when the agent panel did not report; fix the cause (one 4B model on a 6 GB "
                       "GPU, 2 concurrent calls, 1 timeout retry).",
@@ -311,6 +317,32 @@ def analyze_position(session: Session, position_id: int, data: Any = None, *,
             issues.append(_issue("REVENGE_REENTRY", f"{pos.symbol} was stopped out {mins:.0f} min earlier"))
         if pos.mode == "INTRADAY" and time(11, 45) <= opened.time() < time(13, 15):
             issues.append(_issue("MIDDAY_ENTRY", f"entry at {_hm(opened)}"))
+    beh = prop.get("behaviour") if isinstance(prop.get("behaviour"), dict) else None
+    if beh is None and data is not None and opened is not None and pos.mode in ("INTRADAY", "BTST"):
+        try:
+            from features.price_behaviour import compute
+
+            if settings is None:
+                from config.loader import load_default_settings
+
+                settings = load_default_settings()
+            beh = compute(data, pos.symbol, opened, direction=pos.direction, live_price=entry,
+                          thresholds=settings.risk)
+        except Exception:  # noqa: BLE001 - advisory
+            beh = None
+    if beh and beh.get("range_pos") is not None and beh.get("range_vs_adr") is not None:
+        side_pos = beh["range_pos"] if long_ else 1.0 - beh["range_pos"]
+        if beh.get("verdict") in ("CHASING", "FADES") or (side_pos >= 0.7 and beh["range_vs_adr"] >= 1.0):
+            parts = [f"entry at {side_pos * 100:.0f}% toward the {'high' if long_ else 'low'} of the day's range "
+                     f"{beh.get('day_low')}-{beh.get('day_high')}",
+                     f"the day had already moved {beh['range_vs_adr'] * 100:.0f}% of its normal range"]
+            if beh.get("vwap_ext_atr") is not None:
+                parts.append(f"{abs(beh['vwap_ext_atr']):.1f} ATR {'above' if beh['vwap_ext_atr'] >= 0 else 'below'} "
+                             f"VWAP {beh.get('vwap')}")
+            if beh.get("samples"):
+                parts.append(f"in its last {beh['samples']} comparable sessions only "
+                             f"{(beh.get('continuation_rate') or 0) * 100:.0f}% of such moves continued")
+            issues.append(_issue("BOUGHT_HIGH", "; ".join(parts)))
     stopped = any(t.exit_reason in ("SL", "GAP") for t in legs)
     if stopped and after_hit_t1 is not None:
         issues.append(_issue("NOISE_STOP", f"stopped at {_hm(closed)}, target 1 {t1} reached at {_hm(after_hit_t1)}"))
@@ -344,7 +376,7 @@ def analyze_position(session: Session, position_id: int, data: Any = None, *,
         "mfe_r": _r2(mfe / risk) if mfe is not None and risk else None,
         "mae_r": _r2(mae / risk) if mae is not None and risk else None,
         "data_read_at": _iso(data_at), "decided_at": _iso(decided_at), "signal_valid_until": _iso(valid_until),
-        "failed_agents_pct": _r2(failed_pct), "room_r": _r2(room_r),
+        "failed_agents_pct": _r2(failed_pct), "room_r": _r2(room_r), "behaviour": beh,
         "story": story, "diagnosis": issues, "decision": dec,
         "chart": {"timeframe": "5m" if not tf_used or tf_used == "5m" else "1m",
                   "from": _iso(chart_from), "to": _iso(chart_to)},

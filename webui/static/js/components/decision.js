@@ -5,6 +5,8 @@ import { api } from '../api.js';
 import { h, icon } from '../dom.js';
 import * as f from '../format.js';
 import * as ui from '../ui.js';
+import { followUpButton } from './followup.js';
+import { behaviourBlock, RULE_HELP } from './behaviour.js';
 
 const SIGNAL_TONE = { BULLISH: 'good', BEARISH: 'bad', NEUTRAL: '' };
 
@@ -24,6 +26,7 @@ export function decisionHeader(d) {
   return [
     h('h2', null, d.symbol), ui.modeBadge(d.mode), ui.dirBadge(d.direction), ui.actionChip(d.final_action),
     h('span', { class: 'faint small' }, `${f.dateTime(d.time)} IST · #${d.id}`),
+    followUpButton(d.symbol, { decisionId: d.id, mode: d.mode, compact: true }),
   ];
 }
 
@@ -62,6 +65,8 @@ export function renderDecision(d) {
   if (d.vote || d.agents?.length) out.push(section('AI agent votes', agentsBlock(d.vote, d.agents)));
   if (d.debate) out.push(section('Bull vs Bear debate', debateBlock(d.debate)));
   if (d.meta) out.push(section('Meta agent (final AI decision)', metaBlock(d.meta)));
+  const beh = behaviourBlock(d.behaviour);
+  if (beh) out.push(section('Price behaviour (deterministic check)', beh));
   if (d.risk) out.push(section('Risk manager (deterministic, can veto anything)', riskBlock(d.risk)));
   if (d.sl_candidates?.length) {
     out.push(section('Stop-loss candidates', ui.table([
@@ -163,7 +168,7 @@ export function riskBlock(r) {
   return h('div', { class: 'stack' },
     h('div', { class: 'row' },
       ui.badge(r.approved ? 'APPROVED' : 'REJECTED', r.approved ? 'good' : 'bad'),
-      r.rule ? h('span', { class: 'mono' }, r.rule) : null,
+      r.rule ? h('span', { class: 'mono', title: RULE_HELP[r.rule] || null }, r.rule) : null,
       f.isNum(r.qty) ? h('span', { class: 'small muted' }, `qty ${r.qty} / max ${r.max_qty ?? '–'}`) : null,
       f.isNum(r.risk_amount) ? h('span', { class: 'small muted' }, `risk ${f.inr(r.risk_amount)}`) : null,
       f.isNum(r.charges_estimate_total) ? h('span', { class: 'small muted' }, `est. charges ${f.inr(r.charges_estimate_total)}`) : null,
@@ -171,7 +176,7 @@ export function riskBlock(r) {
       r.tier ? ui.badge(`Tier ${r.tier}`) : null),
     r.message && !r.approved ? h('div', { class: 'small' }, r.message) : null,
     checks.length ? h('div', { class: 'checks' }, checks.map((c) => h('div', { class: ['check', c.passed ? 'ok' : 'fail'] },
-      h('span', { class: 'ic' }, c.passed ? '✓' : '✗'), h('span', { class: 'rule' }, c.rule),
+      h('span', { class: 'ic' }, c.passed ? '✓' : '✗'), h('span', { class: 'rule', title: RULE_HELP[c.rule] || null }, c.rule),
       h('span', { class: 'det' }, c.passed ? (c.detail ? 'ok' : '') : (c.detail || 'failed'))))) : null,
     checks.length ? h('div', { class: 'tiny faint' }, `${checks.filter((c) => c.passed).length} of ${checks.length} checks passed`) : null);
 }

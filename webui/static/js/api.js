@@ -69,6 +69,8 @@ async function request(method, path, { body, background = false, signal } = {}) 
 export const api = {
   get: (path, opts) => request('GET', path, opts),
   post: (path, body = {}, opts) => request('POST', path, { ...opts, body }),
+  patch: (path, body = {}, opts) => request('PATCH', path, { ...opts, body }),
+  del: (path, opts) => request('DELETE', path, opts),
 };
 
 export function qs(params) {

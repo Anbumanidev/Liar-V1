@@ -6,6 +6,11 @@ each day - a bucket never spans two sessions (the last bucket of a day may be sh
 
 Chart ``time`` values are IST wall-clock epoch seconds (UTC epoch + 19 800 s) because
 Lightweight Charts renders timestamps as UTC; see ``webui.util.IST_OFFSET_S``.
+
+History: :func:`load_window` serves the latest ``bars``, a named ``range`` (1D ... MAX, clamped to
+what the provider keeps for the timeframe - :data:`HISTORY_DAYS`) or the ``bars`` ending
+``before`` a chart time (scroll-back pagination), and reports ``has_more`` /
+``earliest_available`` so the chart knows when the start of the available history is reached.
 """
 
 from __future__ import annotations
@@ -16,7 +21,7 @@ import time as _time
 from bisect import bisect_right
 from collections import OrderedDict
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 import numpy as np
@@ -213,6 +218,146 @@ def frame_payload(df: pd.DataFrame, spec: TfSpec) -> dict[str, Any]:
     return out
 
 
+# =========================================================================== history window (range / before)
+
+#: How far back the data provider keeps each timeframe, in calendar days (Yahoo; ``MarketDataService``
+#: clamps older requests automatically). Resampled timeframes inherit their source's limit.
+HISTORY_DAYS: dict[str, int] = {"1m": 7, "5m": 59, "10m": 59, "15m": 59, "20m": 59, "30m": 59, "1h": 729, "5h": 729,
+                                "1d": 4383, "1wk": 10957}
+HISTORY_NOTE: dict[str, str] = {
+    "1m": "Yahoo keeps 1-minute candles for ~7 days",
+    "5m": "Yahoo keeps 5m for ~59 days", "10m": "10m is built from 5m; Yahoo keeps 5m for ~59 days",
+    "15m": "Yahoo keeps 15m for ~59 days", "20m": "20m is built from 5m; Yahoo keeps 5m for ~59 days",
+    "30m": "30m is built from 5m; Yahoo keeps 5m for ~59 days",
+    "1h": "Yahoo keeps hourly candles for ~2 years", "5h": "5h is built from 1h; Yahoo keeps 1h for ~2 years",
+    "1d": "daily history is shown for ~12 years", "1wk": "weekly candles cover the full listed history",
+}
+RANGES = ("1D", "5D", "1M", "3M", "6M", "1Y", "5Y", "MAX")
+_RANGE_DAYS = {"1M": 30, "3M": 91, "6M": 182, "1Y": 365, "5Y": 1826}
+#: Upper bound of bars per request (range responses are trimmed to the newest MAX_BARS).
+MAX_BARS = 5000
+_OPEN = time(9, 15)
+
+
+def _at_open(d: date) -> datetime:
+    return datetime.combine(d, _OPEN, tzinfo=IST)
+
+
+def earliest_available(spec: TfSpec, now: datetime) -> datetime:
+    """Oldest bar the provider keeps for ``spec`` (intraday: to the minute; daily/weekly: that day's open)."""
+    start = to_ist(now) - timedelta(days=HISTORY_DAYS[spec.key])
+    if not spec.intraday:
+        return _at_open(start.date())
+    return start.replace(second=0, microsecond=0) + timedelta(minutes=1)
+
+
+def _last_session(now: datetime, calendar: Any) -> date:
+    today = to_ist(now).date()
+    try:
+        if calendar.is_trading_day(today) and now >= calendar.market_open_dt(today):
+            return today
+        return calendar.prev_trading_day(today)
+    except Exception:  # noqa: BLE001 - calendar unavailable: weekdays only
+        d = today if now.time() >= _OPEN else today - timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        return d
+
+
+def _sessions_back(day: date, n: int, calendar: Any) -> date:
+    """The trading day ``n`` sessions before ``day`` (weekday fallback without a calendar)."""
+    try:
+        return calendar.add_trading_days(day, -n) if n else day
+    except Exception:  # noqa: BLE001
+        d = day
+        while n > 0:
+            d -= timedelta(days=1)
+            if d.weekday() < 5:
+                n -= 1
+        return d
+
+
+def range_start(key: str, spec: TfSpec, now: datetime, calendar: Any) -> datetime:
+    """Unclamped start of a named range (1D/5D = session opens; months/years = that day's open)."""
+    if key == "MAX":
+        return earliest_available(spec, now)
+    if key in ("1D", "5D"):
+        last = _last_session(now, calendar)
+        return _at_open(_sessions_back(last, 0 if key == "1D" else 4, calendar))
+    return _at_open(to_ist(now).date() - timedelta(days=_RANGE_DAYS[key]))
+
+
+def start_for_bars(spec: TfSpec, end: datetime, bars: int, calendar: Any) -> datetime:
+    """A start that yields at least ``bars`` bars before ``end`` (one spare session / a few spare bars)."""
+    end_day = to_ist(end).date()
+    if spec.intraday:
+        per_day = max(1, math.ceil(_SESSION_MIN / spec.bar_minutes))
+        return _at_open(_sessions_back(end_day, math.ceil(bars / per_day) + 1, calendar))
+    if spec.key == "1d":
+        return _at_open(_sessions_back(end_day, bars + 3, calendar))
+    return _at_open(end_day - timedelta(weeks=bars + 2))
+
+
+def _fetch_from(data: Any, symbol: str, spec: TfSpec, start: datetime) -> pd.DataFrame:
+    """Every closed bar of ``spec`` from ``start`` up to now (resampled timeframes session-anchored)."""
+    lead = timedelta(minutes=spec.minutes) if spec.minutes else timedelta(0)
+    df = data.candles(symbol, spec.source, lookback_bars=MAX_BARS, start=start - lead)
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    if spec.minutes is not None:
+        df = resample_session(df, spec.minutes)
+    return df
+
+
+def _gap_tolerance(spec: TfSpec) -> timedelta:
+    """How far the first bar may sit after the requested start and still count as 'data goes further back'."""
+    return timedelta(days=5) if spec.intraday else timedelta(days=8 if spec.key == "1d" else 22)
+
+
+def load_window(data: Any, symbol: str, spec: TfSpec, now: datetime, calendar: Any, *, bars: int,
+                start: datetime | None = None, end: datetime | None = None, range_key: str | None = None,
+                before: datetime | None = None) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Fetch one chart window. Precedence: ``before`` > ``range_key`` > ``start``/``end`` > latest ``bars``.
+
+    Returns ``(frame, info)`` where ``info`` has ``has_more`` (older bars exist), ``earliest_available``,
+    ``clamped`` (the request reached past the provider's history) and the effective ``start``.
+    """
+    earliest = earliest_available(spec, now)
+    info: dict[str, Any] = {"range": None, "clamped": False, "start": None, "before": None}
+    if before is not None:
+        want = start_for_bars(spec, before, bars, calendar)
+        clamped = want <= earliest
+        eff = max(want, earliest)
+        df = _fetch_from(data, symbol, spec, eff)
+        df = df.loc[pd.DatetimeIndex(df.index) < pd.Timestamp(to_ist(before))]
+        has_more = len(df) > bars or (len(df) == bars and not clamped)
+        df = df.tail(bars)
+        info |= {"clamped": clamped, "start": iso(eff), "before": iso(before)}
+    elif range_key is not None:
+        want = range_start(range_key, spec, now, calendar)
+        clamped = range_key == "MAX" or want < earliest
+        eff = max(want, earliest)
+        df = _fetch_from(data, symbol, spec, eff)
+        if end is not None:
+            df = df.loc[pd.DatetimeIndex(df.index) <= pd.Timestamp(to_ist(end))]
+        first = pd.Timestamp(df.index[0]).to_pydatetime() if len(df) else None
+        has_more = not clamped and first is not None and first - eff <= _gap_tolerance(spec)
+        if len(df) > MAX_BARS:
+            df, has_more = df.tail(MAX_BARS), True
+        info |= {"range": range_key, "clamped": clamped, "start": iso(eff)}
+    else:
+        df = build_frame(data, symbol, spec, bars, start, end)
+        if start is not None:
+            first = pd.Timestamp(df.index[0]).to_pydatetime() if len(df) else None
+            has_more = first is not None and start > earliest and first - start <= _gap_tolerance(spec)
+            info |= {"clamped": start <= earliest, "start": iso(start)}
+        else:
+            has_more = len(df) >= bars
+    info |= {"has_more": bool(has_more), "earliest_available": iso(earliest),
+             "history_days": HISTORY_DAYS[spec.key], "history_note": HISTORY_NOTE[spec.key]}
+    return df, info
+
+
 def _snap(times: list[int], t: int, bar_seconds: int) -> int | None:
     """Bar time containing ``t`` (last bar opening at or before it); None if outside the data."""
     if not times or t < times[0]:
@@ -224,8 +369,13 @@ def _snap(times: list[int], t: int, bar_seconds: int) -> int | None:
 
 
 def trade_overlays(session: Session, symbol: str, times: list[int], spec: TfSpec,
-                   position_id: int | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Markers (entries/exits) inside the candle range + price lines for open positions."""
+                   position_id: int | None = None, hi_time: int | None = None
+                   ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Markers (entries/exits) inside the candle range + price lines for open positions.
+
+    ``hi_time`` (chart time, exclusive) drops fills at/after it - used by scroll-back pages so a fill that
+    belongs to the newer, already loaded bars is never snapped onto this page's last bar.
+    """
     markers: list[dict[str, Any]] = []
     lines: list[dict[str, Any]] = []
     bar_s = spec.bar_minutes * 60 if spec.intraday else 86_400 * (7 if spec.key == "1wk" else 1)
@@ -237,7 +387,10 @@ def trade_overlays(session: Session, symbol: str, times: list[int], spec: TfSpec
         for o in session.execute(stmt).scalars():
             if o.purpose != "ENTRY" or o.filled_at is None:
                 continue
-            t = _snap(times, int(to_ist(o.filled_at).timestamp()) + IST_OFFSET_S, bar_s)
+            raw = int(to_ist(o.filled_at).timestamp()) + IST_OFFSET_S
+            if hi_time is not None and raw >= hi_time:
+                continue
+            t = _snap(times, raw, bar_s)
             if t is None:
                 continue
             long_ = o.side == "BUY"
@@ -249,7 +402,10 @@ def trade_overlays(session: Session, symbol: str, times: list[int], spec: TfSpec
         if position_id is not None:
             t_stmt = t_stmt.where(Trade.position_id == position_id)
         for tr in session.execute(t_stmt).scalars():
-            t = _snap(times, int(to_ist(tr.exit_time).timestamp()) + IST_OFFSET_S, bar_s)
+            raw = int(to_ist(tr.exit_time).timestamp()) + IST_OFFSET_S
+            if hi_time is not None and raw >= hi_time:
+                continue
+            t = _snap(times, raw, bar_s)
             if t is None:
                 continue
             long_ = tr.direction == "LONG"
