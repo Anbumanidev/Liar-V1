@@ -19,3 +19,4 @@ max_slippage_pct: 1.0
 allow_overnight_shorts: false    # Indian cash market: no overnight shorts
 sl_tighten_only: true            # stop-loss may only move closer to price
 allow_averaging_down: false      # never add to a losing position
+allow_full_auto: true            # false = FULL_AUTO / HYBRID autonomy can never be enabled from the dashboard

@@ -282,3 +282,25 @@ def test_shadow_update_closes_rows(env) -> None:  # type: ignore[no-untyped-def]
     assert env.shadow.create(env.session, batch_id=env.batch_id, symbol="BAD", mode=Mode.INTRADAY,
                              direction=Direction.LONG, entry=100, stop_loss=101, target_1=102,
                              source=RejectionSource.META) is None
+
+
+@pytest.mark.parametrize("autonomy,grade,conf,final", [
+    ("FULL_AUTO", Grade.B, 70, "EXECUTED"),
+    ("HUMAN_IN_THE_LOOP", Grade.A_PLUS, 99, "QUEUED"),
+    ("SIGNALS_ONLY", Grade.A_PLUS, 99, "SIGNAL_ONLY"),
+    ("HYBRID", Grade.A_PLUS, 90, "EXECUTED"),
+    ("HYBRID", Grade.A, 90, "QUEUED"),
+])
+def test_global_autonomy_overrides_mode_policy(env, autonomy: str, grade: Grade, conf: int, final: str) -> None:  # type: ignore[no-untyped-def]
+    s = update_settings(env.s, {"modes.autonomy": autonomy, "modes.modes.INTRADAY.execution_policy": "MANUAL_APPROVE",
+                                "modes.modes.INTRADAY.min_grade": "B"})
+    p = proposal(env, grade=grade, confidence=conf)
+    st = build_risk_state(env.session, batch_id=env.batch_id, capital_manager=env.capital, clock=env.clock,
+                          calendar=env.cal)
+    v = env.risk.evaluate(p, st)
+    assert v.approved, v.message
+    d = _decision(env)
+    out = route_decision(env.session, settings=s, decision=d, proposal=p, verdict=v, broker=env.broker,
+                         queue=env.queue, shadow=env.shadow)
+    assert out == final
+    assert d.context_json["autonomy"] == autonomy

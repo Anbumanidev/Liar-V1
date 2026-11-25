@@ -102,13 +102,34 @@ def _watchlist(svc: Any, mode: Mode, batch_id: int) -> list[str]:
     return build_watchlist(svc, mode, batch_id)
 
 
+def _ranked(svc: Any, mode: Mode, symbols: list[str], cap: int) -> list[str]:
+    """Top ``cap`` 'stocks in play' (cached for ``engine.ranking_refresh_minutes``)."""
+    from strategies.ranking import rank_in_play
+
+    now = _now(svc)
+    bucket = (now.hour * 60 + now.minute) // svc.settings.engine.ranking_refresh_minutes
+    key = f"ranking:{mode.value}"
+    cached = svc.extras.get(key)
+    if cached and cached[0] == (now.date(), bucket):
+        return cached[1]
+    ranked = rank_in_play(symbols, svc.data, now, top_n=cap)
+    chunk = [r.symbol for r in ranked]
+    svc.extras[key] = ((now.date(), bucket), chunk)
+    log_event("scans", {"event": "in_play_ranking", "mode": mode.value,
+                        "top": [{"symbol": r.symbol, "score": r.score, "rvol": r.rvol, "move_pct": r.move_pct}
+                                for r in ranked]}, clock=svc.clock)
+    return chunk
+
+
 def _scan(svc: Any, mode: Mode, run_type: RunType, *, rotate: bool, check_timing: bool) -> dict[str, Any]:
     batch_id = _active_batch_id(svc)
     if batch_id is None or not _engine_running(svc) or not _mode_tradeable(svc, mode, batch_id):
         return {"skipped": "engine not running / batch not active / mode disabled or paused"}
     symbols = _watchlist(svc, mode, batch_id)
     cap = svc.settings.mode(mode).max_symbols_per_cycle
-    if rotate and len(symbols) > cap:
+    if rotate and len(symbols) > cap and svc.settings.engine.watchlist_ranking:
+        chunk = _ranked(svc, mode, symbols, cap)
+    elif rotate and len(symbols) > cap:
         key = f"rotation:{mode.value}"
         start = svc.extras.get(key, 0) % len(symbols)
         chunk = (symbols[start:] + symbols[:start])[:cap]
@@ -289,6 +310,22 @@ def job_eod_report(svc: Any) -> dict[str, Any]:
         if b is None:
             return {"skipped": "no batch"}
         report = build_eod_report(s, b.id, day, svc.clock, settings=svc.settings)
+        try:
+            from storage.models import Position as _Pos
+            from storage.models import Trade as _Trade
+            from tax.engine import summarize, tax_tips, trade_tax_lines
+
+            trades = list(s.execute(select(_Trade).where(_Trade.batch_id == b.id)).scalars())
+            opens = list(s.execute(select(_Pos).where(_Pos.batch_id == b.id,
+                                                      _Pos.status == PositionStatus.OPEN.value)).scalars())
+            summary = summarize(trade_tax_lines(trades, svc.settings.charges, svc.settings.tax), svc.settings.tax, day)
+            report = dict(report)
+            report["tax"] = summary.as_dict()
+            report["tax_tips"] = [t.as_dict() for t in tax_tips(summary, opens, day, svc.settings.tax,
+                                                                svc.settings.charges)
+                                  if t.severity in ("saving", "warning")][:5]
+        except Exception as exc:  # noqa: BLE001 - tax section is informational
+            logger.warning(f"[eod_report] tax section failed: {exc}")
     svc.notifier.eod(report)
     return {"sent": True}
 

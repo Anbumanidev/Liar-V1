@@ -152,6 +152,56 @@ python scripts/backup_db.py --keep 30
 * **Converting a position:** an open INTRADAY long can be converted to SWING/POSITIONAL before
   15:10, if the target mode's allocation and the risk limits allow it.
 
+### Who decides: fully automatic or human in the loop
+One switch, on the dashboard **Home** page (also Settings → Modes), in `config/modes.yaml`
+(`autonomy:`) or from the command line (`python main.py engine --autonomy FULL_AUTO`):
+
+| Setting | What happens to a risk-approved trade |
+|---|---|
+| `PER_MODE` (default) | each mode's own execution policy (all default to MANUAL_APPROVE) |
+| `HUMAN_IN_THE_LOOP` | every trade waits for your Approve / Reject / Modify |
+| `HYBRID` | auto-executes only top setups (default grade A+ and confidence ≥ 85), the rest wait for you |
+| `FULL_AUTO` | every trade executes automatically (typed `CONFIRM` required on the dashboard) |
+| `SIGNALS_ONLY` | logged + emailed, never executed |
+
+Notes:
+* The risk manager and capital protection still veto every trade in every setting.
+* `config/hard_caps.yaml: allow_full_auto: false` locks FULL_AUTO and HYBRID off. That file can
+  only be edited on disk.
+* Every switch is an audited settings version.
+
+### Tax & charges (estimates, not tax advice)
+**Rules used** (FY 2026-27; Income-tax Act 2025 in force from 1 April 2026; Budget 2026 kept the
+rates):
+
+| Trade | Tax head | Rate |
+|---|---|---|
+| Intraday | speculative business income | your slab rate |
+| Delivery held ≤ 12 months | STCG (old s.111A → new s.196) | 20% |
+| Delivery held > 12 months | LTCG (old s.112A → new s.198) | 12.5% above ₹1.25 lakh per FY |
+
+* 4% cess (plus surcharge if you set one) on top.
+* Short-term losses offset STCG and then LTCG; long-term losses offset only LTCG; intraday losses
+  offset only intraday profit.
+* STT is not deductible from capital gains.
+
+**Before a trade**, every approval card (and the manual-trade preview) shows:
+* the tax head;
+* charges, tax and **what you keep** at the SL, T1 and T2 exits;
+* the price move needed just to pay the charges;
+* the after-tax R:R.
+
+**After trades**, the **Tax & charges** page shows:
+* the FY estimate, with set-off and carry-forward;
+* STT paid;
+* per-trade tax lines;
+* tips with estimated savings. The tips are rule-based: tax-loss harvesting before 31 March,
+  carry-forward reminders, the LTCG exemption left, advance-tax dates (15 Jun / Sep / Dec / Mar),
+  the business-income option, and cutting DP charges by selling the whole quantity in one go.
+
+The EOD email includes the FY estimate and the top tips. Set your slab rate under Tax & charges →
+Tax settings (or `config/tax.yaml`).
+
 ### Risk manager (final veto)
 **Sizing:**
 * Risk per trade is 1 % of the mode's sizing capital.
@@ -221,7 +271,31 @@ round-trip charges is ≤ 0, or if charges exceed 1 % of the position value.
 
 ---
 
+### Advanced methods
+* **"Stocks in play" ranking** (`strategies/ranking.py`): each intraday cycle analyses the
+  watchlist stocks most likely to move first. The ranking uses relative volume at the same time of
+  day, the gap or move from the previous close, the range versus ATR, and strength versus NIFTY.
+  It refreshes every 15 minutes (`engine.watchlist_ranking`).
+* **Monte Carlo risk-of-ruin** (Analytics → Risk lab): your own trade results are resampled
+  thousands of times, with the same HALT floors as live trading. It shows the chance of profit, the
+  chance of a HALT, final-equity bands and the 95th-percentile drawdown.
+* **Agent calibration** (Risk lab): the hit rate and Brier score of every AI agent are measured
+  against what the price did next, on both traded and shadow setups. It suggests agent weights that
+  you apply with one click; nothing changes automatically. Validate them with a walk-forward replay.
+
 ## 5. The dashboard
+The navigation is grouped as **Home · Trading · Analytics · Settings · System**. Home is a
+one-screen cockpit:
+* alerts (HALT, engine down, data feed);
+* equity, today's P&L, drawdown, TRADING / RESERVE;
+* Start / Pause buttons;
+* the autonomy switch;
+* trades waiting for you, with one-tap Approve / Reject and their after-tax value;
+* open positions;
+* a **setup checklist** (engine, Ollama models, email, data, charges verification) with the
+  command that fixes each item;
+* a plain-language "how it works".
+
 * A batch selector at the top filters every page. Every page needs login, and the layout works on
   a phone.
 * **Analytics:**
@@ -291,8 +365,9 @@ notifications/ email sender, notifier, EOD report, templates
 dashboard/     Streamlit app, auth, control pages, analytics pages
 control/       command payloads/queue, processor, batches, bootstrap, engine loop
 scheduler/     daily plan, jobs, REPLAY, walk-forward
+tax/           Indian tax estimates (pre-trade, FY set-off, tips)
 scripts/       set_password, pull_models, backup_db, health_check
-tests/         ~1,100 tests (pytest)
+tests/         ~1,140 tests (pytest)
 ```
 
 ## 8. Tests

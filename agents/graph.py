@@ -257,7 +257,8 @@ class AnalysisPipeline:
     # ------------------------------------------------------------------ nodes
 
     def _market(self, now: datetime) -> MarketContext | None:
-        key = now.strftime("%Y-%m-%d %H:%M")
+        ttl = max(1, self.s.settings.engine.market_context_cache_minutes)
+        key = f"{now:%Y-%m-%d}:{(now.hour * 60 + now.minute) // ttl}"
         cached = self.s.market_cache.get("market")
         if cached is not None and cached[0] == key:
             return cached[1]
@@ -553,7 +554,7 @@ class AnalysisPipeline:
                     if not st.get("route", True):
                         row.final_action = FINAL_ANALYZED
                     else:
-                        summary = _approval_summary(st)
+                        summary = _approval_summary(st, s.settings)
                         final = route_decision(session, settings=s.settings, decision=row, proposal=proposal,
                                                verdict=verdict, broker=s.broker, queue=s.queue, shadow=s.shadow,
                                                notifier=s.notifier, summary=summary, clock=s.clock)
@@ -593,15 +594,31 @@ def _feature_digest(ctx: StockContext | None) -> dict[str, Any] | None:
     })
 
 
-def _approval_summary(st: PipelineState) -> dict[str, Any]:
-    """Top bull/bear points etc. for the approval queue + email."""
+def _approval_summary(st: PipelineState, settings: Settings | None = None) -> dict[str, Any]:
+    """Top bull/bear points, charges and the pre-trade TAX estimate for the approval queue + email."""
     debate = st.get("debate")
     meta = st.get("meta")
     conf = st.get("confluence")
     verdict = st.get("verdict")
+    proposal = st.get("proposal")
+    bull = debate.bull.top_arguments[:3] if debate is not None and debate.bull else []
+    bear = debate.bear.top_arguments[:3] if debate is not None and debate.bear else []
+    tax: dict[str, Any] | None = None
+    if settings is not None and proposal is not None and verdict is not None and verdict.qty > 0             and settings.tax.show_in_approvals:
+        try:
+            from tax.engine import pre_trade_estimate
+
+            tax = pre_trade_estimate(proposal.mode, proposal.direction, verdict.qty, proposal.entry_price,
+                                     proposal.stop_loss, proposal.target_1, proposal.target_2, settings.charges,
+                                     settings.tax).as_dict()
+        except Exception as exc:  # noqa: BLE001 - informational only
+            logger.warning(f"[pipeline] tax estimate failed: {exc}")
     return to_jsonable({
-        "bull": (debate.bull.top_arguments[:3] if debate is not None and debate.bull else []),
-        "bear": (debate.bear.top_arguments[:3] if debate is not None and debate.bear else []),
+        "bull": bull,
+        "bear": bear,
+        "bull_points": bull,
+        "bear_points": bear,
+        "tax": tax,
         "reasons_for": meta.reasons_for[:5] if meta is not None else [],
         "reasons_against": meta.reasons_against_considered[:5] if meta is not None else [],
         "confluence": conf.score if conf else None,

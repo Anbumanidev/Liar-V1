@@ -155,4 +155,15 @@
 {% else %}
 <p style="margin:4px 0;color:#6b6a66;">No agent failures today.</p>
 {% endif %}
+
+{% if r.tax is defined and r.tax %}
+{{ m.section("Tax estimate (" ~ r.tax.fy ~ ", not tax advice)") }}
+<p style="margin:4px 0;">Estimated tax {{ r.tax.total_tax|inr(2) }} on net {{ r.tax.net_profit_before_tax|inr(2, true) }}
+ &middot; after tax {{ r.tax.net_profit_after_tax|inr(2, true) }} &middot; STT paid {{ r.tax.stt_paid|inr(2) }}</p>
+{% if r.tax_tips is defined and r.tax_tips %}
+<ul style="margin:4px 0;padding-left:18px;">
+  {% for t in r.tax_tips %}<li style="margin:3px 0;"><strong>{{ t.title }}</strong>: {{ t.detail }}{% if t.est_saving %} <em>(save ~{{ t.est_saving|inr(2) }})</em>{% endif %}</li>{% endfor %}
+</ul>
+{% endif %}
+{% endif %}
 {% endblock %}

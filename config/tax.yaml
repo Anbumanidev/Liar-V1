@@ -1,0 +1,25 @@
+# =====================================================================================
+#  INDIAN INCOME-TAX ESTIMATES (section added on owner request). NOT TAX ADVICE.
+#  Paper trades are simulated: tax only applies to real trades. Confirm with a CA.
+#
+#  FY 2026-27 (Income-tax Act, 2025 in force from 1 April 2026; Budget 2026 kept the rates):
+#   * Intraday equity (bought & sold the same day)  -> SPECULATIVE business income, your slab rate.
+#     Losses set off only against speculative income; carry forward 4 years.
+#   * Delivery, held <= 12 months (BTST/SWING/POSITIONAL) -> STCG 20 % (old s.111A, new s.196).
+#   * Delivery, held  > 12 months -> LTCG 12.5 % above Rs 1.25 lakh per FY (old s.112A, new s.198).
+#   * Short-term capital loss offsets STCG and LTCG; long-term loss only LTCG; carry forward 8 years.
+#   * + 4 % health & education cess (+ surcharge for high incomes).
+#   * STT is NOT deductible from capital gains (it is for business income); brokerage, exchange,
+#     SEBI, stamp, GST and DP charges are deductible as cost of transfer.
+# =====================================================================================
+last_verified: 2026-11-25
+slab_rate_pct: 30            # set to YOUR marginal slab rate (applies to intraday/speculative income)
+stcg_rate_pct: 20
+ltcg_rate_pct: 12.5
+ltcg_exemption: 125000
+ltcg_min_holding_days: 366
+cess_pct: 4
+surcharge_pct: 0
+delivery_as_business: false  # true = treat delivery trades as (non-speculative) business income
+basic_exemption_unused: 0    # unused basic exemption limit that capital gains can absorb (residents)
+show_in_approvals: true

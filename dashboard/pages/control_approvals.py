@@ -43,10 +43,29 @@ def _render_reasoning(details: svc.DecisionDetails, item: Any) -> None:
             st.markdown("**Bull:** " + " | ".join(str(b) for b in bull[:3]))
         if bear:
             st.markdown("**Bear:** " + " | ".join(str(b) for b in bear[:3]))
+        tax = summary.get("tax")
+        if tax:
+            st.markdown(f"**Cost & tax before you approve** - {tax.get('head')} at ~{tax.get('rate_pct')}% "
+                        f"(incl. cess) · charges {tax.get('charges_pct_of_value')}% of value · "
+                        f"needs a {tax.get('breakeven_move_pct')}% move to cover charges"
+                        + (f" · after-tax R:R {tax.get('post_tax_rr')}" if tax.get("post_tax_rr") is not None else ""))
+            ui.table([{"exit": sc.get("label"), "price": sc.get("exit_price"), "gross": sc.get("gross"),
+                       "charges": sc.get("charges"), "tax": sc.get("tax"), "you keep": sc.get("net_after_tax")}
+                      for sc in tax.get("scenarios", [])], key=f"tax_{item.id}")
+            for note in tax.get("notes", []):
+                st.caption(note)
     meta = details.meta
     if meta:
         st.markdown("**Meta reasoning**")
-        st.write(meta.get("reasoning") or meta.get("rationale") or "")
+        reasons = meta.get("reasons_for") or []
+        against = meta.get("reasons_against_considered") or []
+        if reasons:
+            st.markdown("For: " + "; ".join(str(r) for r in reasons[:5]))
+        if against:
+            st.markdown("Against (considered): " + "; ".join(str(r) for r in against[:5]))
+        text = meta.get("reasoning") or meta.get("rationale") or meta.get("why_not")
+        if text:
+            st.write(text)
         ui.json_expander("Meta decision (full)", meta)
     ctxj = details.context
     if ctxj:
@@ -64,7 +83,7 @@ def _render_reasoning(details: svc.DecisionDetails, item: Any) -> None:
         with st.expander(f"Debate transcript ({d['rounds']} rounds, {d['status']})"):
             for turn in d.get("transcript_json") or []:
                 if isinstance(turn, dict):
-                    who = turn.get("side") or turn.get("agent") or turn.get("role") or "?"
+                    who = turn.get("speaker") or turn.get("side") or turn.get("agent") or turn.get("role") or "?"
                     text = turn.get("text") or turn.get("argument") or turn.get("content") or turn
                     st.markdown(f"**{who}:** {text}")
                 else:
@@ -74,7 +93,7 @@ def _render_reasoning(details: svc.DecisionDetails, item: Any) -> None:
         approved = risk.get("approved")
         st.markdown(f"**Risk verdict:** {'APPROVED' if approved else ('REJECTED' if approved is False else '-')}"
                     f"{(' - rule ' + str(risk.get('rule'))) if risk.get('rule') else ''}")
-        charges = risk.get("charges") or risk.get("charges_breakdown")
+        charges = risk.get("charges_estimate") or risk.get("charges") or risk.get("charges_breakdown")
         if charges:
             ui.json_expander("Charges", charges)
         ui.json_expander("Risk checks (all)", risk)

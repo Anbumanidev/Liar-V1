@@ -82,6 +82,10 @@ class Services:
         return version_id
 
     def apply_settings(self, settings: Settings, version_id: int | None = None) -> None:
+        old = self.ctx.settings
+        if (old.schedule.holiday_overrides != settings.schedule.holiday_overrides
+                or old.schedule.special_sessions != settings.schedule.special_sessions):
+            self._rebuild_calendar(settings)
         self.ctx.settings = settings
         self.ctx.settings_version_id = version_id
         for svc in (self.capital, self.risk, self.broker, self.monitor, self.shadow, self.queue, self.manual,
@@ -90,6 +94,18 @@ class Services:
             if callable(fn):
                 fn(settings)
         logger.info(f"[bootstrap] settings version {version_id} applied")
+
+    def _rebuild_calendar(self, settings: Settings) -> None:
+        """Holiday overrides / special sessions changed: rebuild the calendar everywhere."""
+        from data.calendar import load_calendar
+
+        cal = load_calendar(settings.schedule, self.ctx.runtime_dir / "cache", fetch=False)
+        self.calendar = cal
+        for svc in (self.data, self.broker, self.monitor, self.shadow, self.queue, self.manual,
+                    getattr(self.pipeline, "s", None), self.features):
+            if svc is not None and hasattr(svc, "calendar"):
+                svc.calendar = cal
+        logger.info("[bootstrap] NSE calendar rebuilt (holiday overrides changed)")
 
     def events_for_window(self, symbol: str, mode: Any, now: datetime) -> list[MarketEvent]:
         """Events inside the holding window of a new ``mode`` position opened at ``now``."""

@@ -284,3 +284,29 @@ def test_replay_full_trade_lifecycle(tmp_path: Path, monkeypatch) -> None:  # ty
         assert acct.last_eod_date == REPLAY_DAYS[0] and acct.blocked == pytest.approx(0.0, abs=1e-6)
         # risk manager limits respected: at most max_trades_per_day INTRADAY entries
         assert s.scalar(select(func.count(Position.id))) <= 3
+
+
+def test_cli_set_autonomy_and_router_policy(svc) -> None:  # type: ignore[no-untyped-def]
+    from main import set_autonomy
+    from core.enums import ExecutionPolicy, Grade
+
+    set_autonomy(svc, "full_auto")
+    assert svc.settings.modes.autonomy.value == "FULL_AUTO"
+    assert svc.settings.modes.effective_policy(Mode.SWING) == ExecutionPolicy.AUTO
+    set_autonomy(svc, "HYBRID")
+    m = svc.settings.modes
+    assert m.effective_policy(Mode.INTRADAY, grade=Grade.A_PLUS, confidence=90) == ExecutionPolicy.AUTO
+    assert m.effective_policy(Mode.INTRADAY, grade=Grade.A, confidence=95) == ExecutionPolicy.MANUAL_APPROVE
+    set_autonomy(svc, "HUMAN_IN_THE_LOOP")
+    assert svc.queue.settings.modes.autonomy.value == "HUMAN_IN_THE_LOOP"   # pushed into services
+
+
+def test_full_auto_locked_by_hard_cap(settings) -> None:  # type: ignore[no-untyped-def]
+    from config.loader import clamp_to_caps, update_settings, validate_against_caps
+    from config.schema import HardCaps
+
+    caps = HardCaps(allow_full_auto=False)
+    s = update_settings(settings, {"modes.autonomy": "FULL_AUTO"})
+    assert any("allow_full_auto" in v for v in validate_against_caps(s, caps))
+    fixed, adj = clamp_to_caps(s, caps)
+    assert fixed.modes.autonomy.value == "HUMAN_IN_THE_LOOP" and adj

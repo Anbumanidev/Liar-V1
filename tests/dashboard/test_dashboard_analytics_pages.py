@@ -66,13 +66,13 @@ def bare_batch(dash_factory: sessionmaker[Session]) -> int:
 
 
 def test_dashboard_analytics_pages_registered() -> None:
-    assert len(ANALYTICS_PAGES) == 9
+    assert len(ANALYTICS_PAGES) == 11
     for name in ANALYTICS_PAGES:
         assert (ROOT / "dashboard" / "pages" / f"{name}.py").exists(), name
         module = importlib.import_module(f"dashboard.pages.{name}")
         assert isinstance(module.TITLE, str) and module.TITLE and module.ICON and callable(module.render)
     loaded = page_modules(ANALYTICS_PAGES, only_existing=True)
-    assert [name for name, _ in loaded] == list(ANALYTICS_PAGES)  # all 9, in order, nothing extra
+    assert [name for name, _ in loaded] == list(ANALYTICS_PAGES)  # all, in order, nothing extra
 
 
 @pytest.mark.parametrize("page", ANALYTICS_PAGES)

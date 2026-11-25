@@ -39,6 +39,22 @@ PAGES_DIR = Path(__file__).resolve().parent / "pages"
 ANALYTICS_PAGES: tuple[str, ...] = (
     "analytics_overview", "analytics_live", "analytics_ledger", "analytics_daywise", "analytics_trades",
     "analytics_rejected", "analytics_me_vs_system", "analytics_performance", "analytics_batches",
+    "analytics_tax", "analytics_risk_lab",
+)
+
+#: Landing page (cockpit).
+HOME_PAGE = "home"
+
+#: User-facing navigation groups (page module names, in display order).
+NAV_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Home", (HOME_PAGE,)),
+    ("Trading", ("control_approvals", "control_positions", "control_manual_trade", "analytics_live")),
+    ("Analytics", ("analytics_overview", "analytics_trades", "analytics_rejected", "analytics_me_vs_system",
+                   "analytics_performance", "analytics_tax", "analytics_risk_lab", "analytics_ledger",
+                   "analytics_daywise", "analytics_batches")),
+    ("Settings", ("control_modes", "control_risk", "control_capital", "control_strategies", "control_agents",
+                  "control_universe", "control_schedule", "control_notifications")),
+    ("System", ("control_engine", "control_batches", "control_system")),
 )
 #: Control pages (section 14.3), in display order. All must exist.
 CONTROL_PAGES: tuple[str, ...] = (
@@ -81,23 +97,30 @@ def page_modules(names: tuple[str, ...], *, only_existing: bool) -> list[tuple[s
 
 
 def build_navigation() -> dict[str, list[st.Page]]:
-    """Section -> pages mapping for ``st.navigation``."""
+    """Group -> pages mapping for ``st.navigation`` (Home is the default landing page)."""
+    loaded: dict[str, ModuleType] = {}
+    for name, module in page_modules(ANALYTICS_PAGES, only_existing=True) + page_modules(CONTROL_PAGES,
+                                                                                          only_existing=False):
+        loaded[name] = module
+    home = _load_page_module(HOME_PAGE) if (PAGES_DIR / f"{HOME_PAGE}.py").exists() else None
+    if home is not None:
+        loaded[HOME_PAGE] = home
     sections: dict[str, list[st.Page]] = {}
-    analytics = page_modules(ANALYTICS_PAGES, only_existing=True)
-    controls = page_modules(CONTROL_PAGES, only_existing=False)
+    placed: set[str] = set()
     default_set = False
-    for section, modules in (("Analytics", analytics), ("Control", controls)):
+    groups = list(NAV_GROUPS)
+    extra = tuple(n for n in loaded if not any(n in names for _, names in NAV_GROUPS))
+    if extra:
+        groups.append(("More", extra))
+    for section, names in groups:
         pages: list[st.Page] = []
-        for name, module in modules:
-            pages.append(
-                st.Page(
-                    module.render,
-                    title=str(getattr(module, "TITLE", name)),
-                    icon=getattr(module, "ICON", None),
-                    url_path=name,
-                    default=not default_set,
-                )
-            )
+        for name in names:
+            module = loaded.get(name)
+            if module is None or name in placed:
+                continue
+            placed.add(name)
+            pages.append(st.Page(module.render, title=str(getattr(module, "TITLE", name)),
+                                 icon=getattr(module, "ICON", None), url_path=name, default=not default_set))
             default_set = True
         if pages:
             sections[section] = pages

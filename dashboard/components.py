@@ -276,3 +276,66 @@ def require_batch(ctx: DashboardContext) -> int | None:
     if ctx.batch_id is None:
         st.info("No batch selected / no batch exists yet. Start one on the Batches page.")
     return ctx.batch_id
+
+
+# ----------------------------------------------------------------------------- autonomy
+
+AUTONOMY_HELP: dict[str, tuple[str, str]] = {
+    "PER_MODE": ("Per mode", "Each mode uses its own execution policy (Settings > Modes)."),
+    "HUMAN_IN_THE_LOOP": ("Human in the loop", "Every trade waits for your Approve / Reject. Nothing executes "
+                                               "without you."),
+    "HYBRID": ("Hybrid", "Top setups (grade and confidence at or above your thresholds) execute automatically; "
+                         "everything else waits for your approval."),
+    "FULL_AUTO": ("Fully automatic", "Every trade the risk manager approves executes immediately - no human. "
+                                     "The risk manager and capital protection still veto everything."),
+    "SIGNALS_ONLY": ("Signals only", "Trades are logged and emailed, never executed."),
+}
+
+
+def autonomy_control(ctx: DashboardContext, settings: Settings, *, key: str = "autonomy") -> None:
+    """Global 'fully automatic vs human in the loop' switch (PAPER trades only)."""
+    from core.enums import Autonomy, Grade, Mode
+
+    current = settings.modes.autonomy.value
+    options = [a.value for a in Autonomy]
+    locked = not ctx.caps.allow_full_auto
+    choice = st.radio(
+        "Who decides?", options, index=options.index(current), key=f"{key}_choice", horizontal=True,
+        format_func=lambda v: AUTONOMY_HELP[v][0] + (" (locked)" if locked and v in ("FULL_AUTO", "HYBRID") else ""),
+        help="Applies to PAPER trades only. The risk manager vetoes every trade in every setting.",
+    )
+    st.caption(AUTONOMY_HELP[choice][1])
+    proposed: dict[str, Any] = {"modes.autonomy": choice}
+    current_vals: dict[str, Any] = {"modes.autonomy": current}
+    if choice == "HYBRID":
+        grades = [g.value for g in (Grade.A_PLUS, Grade.A, Grade.B)]
+        c1, c2 = st.columns(2)
+        g = c1.selectbox("Auto-execute grade at least", grades,
+                         index=grades.index(settings.modes.hybrid_auto_min_grade.value)
+                         if settings.modes.hybrid_auto_min_grade.value in grades else 0, key=f"{key}_grade")
+        conf = c2.number_input("and confidence at least", 0, 100, int(settings.modes.hybrid_auto_min_confidence),
+                               key=f"{key}_conf")
+        proposed |= {"modes.hybrid_auto_min_grade": g, "modes.hybrid_auto_min_confidence": int(conf)}
+        current_vals |= {"modes.hybrid_auto_min_grade": settings.modes.hybrid_auto_min_grade.value,
+                         "modes.hybrid_auto_min_confidence": settings.modes.hybrid_auto_min_confidence}
+    if locked and choice in ("FULL_AUTO", "HYBRID"):
+        st.error("Locked by config/hard_caps.yaml (allow_full_auto: false). Change it on disk to enable.")
+        return
+    needs_confirm = choice in ("FULL_AUTO", "HYBRID") and choice != current
+    ok = True
+    if needs_confirm:
+        st.warning("Automatic execution: trades will be placed (on PAPER) without asking you.")
+        ok = confirm_box("Type CONFIRM to switch to automatic execution", f"{key}_confirm")
+    if choice != current or proposed != current_vals:
+        if st.button("Apply", key=f"{key}_apply", type="primary", disabled=not ok):
+            save_settings(ctx, proposed, current_vals, f"autonomy -> {choice}")
+    rows = []
+    for m in Mode:
+        cfg = settings.mode(m)
+        if not cfg.enabled:
+            continue
+        rows.append({"mode": m.value, "mode policy": cfg.execution_policy.value,
+                     "effective now": settings.modes.effective_policy(m).value
+                     if choice == current else "(after Apply)"})
+    if rows:
+        table(rows, key=f"{key}_eff")

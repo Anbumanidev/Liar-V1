@@ -21,7 +21,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from core.clock import parse_hhmm
-from core.enums import EmailType, ExecutionPolicy, Grade, Mode, SelectionPolicy, Timeframe, TrailingMethod
+from core.enums import Autonomy, EmailType, ExecutionPolicy, Grade, Mode, SelectionPolicy, Timeframe, TrailingMethod
 
 #: Absolute ceiling for MAX_LOSS_PCT. hard_caps.yaml can lower it, never raise it.
 ABSOLUTE_MAX_LOSS_PCT: float = 10.0
@@ -70,6 +70,7 @@ class HardCaps(_Cfg):
     allow_overnight_shorts: bool = False
     sl_tighten_only: bool = True
     allow_averaging_down: bool = False
+    allow_full_auto: bool = True   # false = the dashboard can never switch to FULL_AUTO / HYBRID
 
     @model_validator(mode="after")
     def _hard_coded_invariants(self) -> "HardCaps":
@@ -152,9 +153,34 @@ class ModeConfig(_Cfg):
         return self
 
 
+GRADE_ORDER: tuple[Grade, ...] = (Grade.C, Grade.B, Grade.A, Grade.A_PLUS)
+
+
 class ModesSettings(_Cfg):
     selection_policy: SelectionPolicy = SelectionPolicy.FIXED
+    #: Global switch: fully automatic vs human-in-the-loop (PER_MODE = use each mode's policy).
+    autonomy: Autonomy = Autonomy.PER_MODE
+    #: HYBRID: auto-execute only setups at/above this grade AND confidence; the rest need approval.
+    hybrid_auto_min_grade: Grade = Grade.A_PLUS
+    hybrid_auto_min_confidence: int = Field(default=85, ge=0, le=100)
     modes: dict[Mode, ModeConfig]
+
+    def effective_policy(self, mode: Mode, *, grade: Grade | None = None,
+                         confidence: int | None = None) -> ExecutionPolicy:
+        """Execution policy actually applied to a new trade of ``mode``."""
+        a = Autonomy(self.autonomy)
+        if a == Autonomy.FULL_AUTO:
+            return ExecutionPolicy.AUTO
+        if a == Autonomy.HUMAN_IN_THE_LOOP:
+            return ExecutionPolicy.MANUAL_APPROVE
+        if a == Autonomy.SIGNALS_ONLY:
+            return ExecutionPolicy.SIGNALS_ONLY
+        if a == Autonomy.HYBRID:
+            good_grade = grade is not None and GRADE_ORDER.index(Grade(grade)) >= GRADE_ORDER.index(
+                Grade(self.hybrid_auto_min_grade))
+            good_conf = confidence is not None and confidence >= self.hybrid_auto_min_confidence
+            return ExecutionPolicy.AUTO if (good_grade and good_conf) else ExecutionPolicy.MANUAL_APPROVE
+        return ExecutionPolicy(self.modes[Mode(mode)].execution_policy)
 
     @model_validator(mode="after")
     def _allocations(self) -> "ModesSettings":
@@ -303,6 +329,9 @@ class EngineSettings(_Cfg):
     max_parallel_agents: int = Field(default=4, ge=1, le=16)
     use_os_cert_store: bool = True
     heartbeat_stale_seconds: int = Field(default=30, ge=5)
+    watchlist_ranking: bool = True                 # rank intraday watchlist by "stocks in play" score
+    ranking_refresh_minutes: int = Field(default=15, ge=5, le=120)
+    market_context_cache_minutes: int = Field(default=5, ge=1, le=60)
 
 
 class ModelProfile(_Cfg):
@@ -448,6 +477,32 @@ class ReplaySettings(_Cfg):
     step_minutes: int = Field(default=1, ge=1, le=60)
 
 
+# =========================================================================== tax
+
+
+class TaxSettings(_Cfg):
+    """config/tax.yaml - Indian income-tax ESTIMATES for trades (not tax advice).
+
+    Rates for FY 2026-27 (Income-tax Act, 2025 in force from 1 April 2026; rates unchanged by
+    Budget 2026): STCG on listed equity 20 % (old s.111A -> new s.196), LTCG 12.5 % above
+    Rs 1.25 lakh per FY (old s.112A -> new s.198), intraday equity = speculative business
+    income at your slab rate, health & education cess 4 %.
+    """
+
+    last_verified: date = date(2026, 11, 25)
+    slab_rate_pct: float = Field(default=30.0, ge=0, le=50)       # your marginal slab (speculative / business)
+    stcg_rate_pct: float = Field(default=20.0, ge=0, le=50)
+    ltcg_rate_pct: float = Field(default=12.5, ge=0, le=50)
+    ltcg_exemption: float = Field(default=125_000.0, ge=0)
+    ltcg_min_holding_days: int = Field(default=366, ge=1)         # "more than 12 months"
+    cess_pct: float = Field(default=4.0, ge=0, le=10)
+    surcharge_pct: float = Field(default=0.0, ge=0, le=37)
+    delivery_as_business: bool = False                            # treat delivery trades as business income
+    basic_exemption_unused: float = Field(default=0.0, ge=0)      # unused basic exemption usable vs STCG/LTCG
+    show_in_approvals: bool = True
+    note: str = "Estimates only - not tax advice. Paper trades are simulated; tax applies only to real trades."
+
+
 # =========================================================================== root
 
 
@@ -467,6 +522,7 @@ class Settings(_Cfg):
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
     universe: UniverseSettings = Field(default_factory=UniverseSettings)
     replay: ReplaySettings = Field(default_factory=ReplaySettings)
+    tax: TaxSettings = Field(default_factory=TaxSettings)
 
     def mode(self, mode: Mode) -> ModeConfig:
         return self.modes.modes[mode]

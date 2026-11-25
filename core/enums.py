@@ -392,3 +392,25 @@ class RiskRule(StrEnum):
     INVALID_PRICE = "INVALID_PRICE"
     CONVERSION_NOT_ALLOWED = "CONVERSION_NOT_ALLOWED"
     INSUFFICIENT_CASH = "INSUFFICIENT_CASH"
+
+
+class Autonomy(StrEnum):
+    """Global trading autonomy (overrides the per-mode execution policy unless PER_MODE).
+
+    Applies to PAPER trades only - nothing in this system can place a real order.
+    """
+
+    PER_MODE = "PER_MODE"                    # use each mode's execution_policy
+    FULL_AUTO = "FULL_AUTO"                  # every risk-approved trade executes (no human)
+    HYBRID = "HYBRID"                        # auto only for top setups, the rest to the approval queue
+    HUMAN_IN_THE_LOOP = "HUMAN_IN_THE_LOOP"  # every trade waits for the owner's approval
+    SIGNALS_ONLY = "SIGNALS_ONLY"            # log + email, never execute
+
+
+class TaxHead(StrEnum):
+    """Indian income-tax head of a closed trade (Income-tax Act, 2025)."""
+
+    SPECULATIVE = "SPECULATIVE"   # intraday equity (squared off same day): business income at slab rates
+    STCG = "STCG"                 # listed equity held <= 12 months, STT paid: 20 % (old s.111A, new s.196)
+    LTCG = "LTCG"                 # held > 12 months: 12.5 % above Rs 1.25 lakh per FY (old s.112A, new s.198)
+    BUSINESS = "BUSINESS"         # delivery trades treated as non-speculative business income (owner choice)

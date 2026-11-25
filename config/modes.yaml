@@ -2,6 +2,18 @@
 # Allocations are % of TRADING capital and must sum to <= 100.
 selection_policy: FIXED          # FIXED | AUTO (meta agent recommends best enabled mode)
 
+# ---- WHO DECIDES: fully automatic vs human in the loop (PAPER trades only) ----------------
+#  PER_MODE           use each mode's execution_policy below (default)
+#  FULL_AUTO          every risk-approved trade executes automatically - no human
+#  HYBRID             auto-execute only top setups (grade + confidence below), the rest wait for you
+#  HUMAN_IN_THE_LOOP  every trade waits in your approval queue
+#  SIGNALS_ONLY       log + email only, never execute
+# Switch it from the dashboard Home page. config/hard_caps.yaml allow_full_auto: false locks
+# FULL_AUTO / HYBRID off. The risk manager vetoes every trade in every setting.
+autonomy: PER_MODE
+hybrid_auto_min_grade: "A+"
+hybrid_auto_min_confidence: 85
+
 modes:
   INTRADAY:
     enabled: true

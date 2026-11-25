@@ -37,6 +37,29 @@ def _show_analysis(ctx: Any) -> None:
                                         "report": r.get("report_json")} for r in details.agent_reports])
 
 
+def _preview(ctx: Any, mode: str, direction: str, entry: float, qty: int, sl: float, t1: float, t2: float) -> None:
+    """Charges + tax + net at SL / T1 / T2 before submitting (estimates, not tax advice)."""
+    if entry <= 0 or sl <= 0 or t1 <= 0:
+        st.info("Enter entry, stop-loss and target 1 to preview charges and tax.")
+        return
+    loaded = ui.active_settings(ctx)
+    if loaded is None:
+        return
+    from tax.engine import pre_trade_estimate
+
+    settings = loaded[1]
+    est = pre_trade_estimate(Mode(mode), Direction(direction), qty, entry, sl, t1, t2 or None, settings.charges,
+                             settings.tax)
+    st.markdown(f"**{est.head.value}** at ~{est.rate_pct:.2f}% incl. cess · charges {est.charges_pct_of_value:.2f}% "
+                f"of value · breakeven move {est.breakeven_move_pct:.2f}%"
+                + (f" · after-tax R:R {est.post_tax_rr}" if est.post_tax_rr is not None else ""))
+    ui.table([{"exit": x.label, "price": x.exit_price, "gross": x.gross, "charges": x.charges, "tax": x.tax,
+               "you keep": x.net_after_tax} for x in est.scenarios], key="mt_tax_preview")
+    if est.charges_pct_of_value > settings.risk.max_charges_pct_of_value:
+        st.warning(f"Charges exceed {settings.risk.max_charges_pct_of_value}% of value: the risk manager will reject "
+                   "this (CHARGES_EXCEED_EDGE).")
+
+
 def render() -> None:
     ctx = ui.page_header(TITLE, "")
     if ui.require_batch(ctx) is None:
@@ -70,7 +93,11 @@ def render() -> None:
         t2 = st.number_input("Target 2 (0 = none)", min_value=0.0, value=0.0, step=0.05, key="mt_t2")
         analyze_first = st.checkbox("Run the full agent pipeline before executing (analyze_first)", key="mt_af")
         note = st.text_input("Note", key="mt_note")
-        submitted = st.form_submit_button("Submit manual trade", type="primary")
+        c_prev, c_sub = st.columns(2)
+        preview = c_prev.form_submit_button("Preview charges & tax")
+        submitted = c_sub.form_submit_button("Submit manual trade", type="primary")
+    if preview:
+        _preview(ctx, mode, direction, float(entry), int(qty), float(sl), float(t1), float(t2))
     if submitted:
         errors: list[str] = []
         valid, invalid = svc.parse_symbols(symbol)

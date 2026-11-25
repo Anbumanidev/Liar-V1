@@ -36,6 +36,7 @@ SECTION_FILES: dict[str, str] = {
     "notifications": "notifications.yaml",
     "universe": "universe.yaml",
     "replay": "replay.yaml",
+    "tax": "tax.yaml",
 }
 
 
@@ -182,6 +183,8 @@ def validate_against_caps(settings: Settings, caps: HardCaps) -> list[str]:
             violations.append(f"{rule.path}={value} exceeds hard cap {rule.cap_attr}={limit}")
         if rule.kind == "min" and value < limit - 1e-12:
             violations.append(f"{rule.path}={value} is below hard floor {rule.cap_attr}={limit}")
+    if not caps.allow_full_auto and settings.modes.autonomy.value in ("FULL_AUTO", "HYBRID"):
+        violations.append(f"modes.autonomy={settings.modes.autonomy.value} is locked by hard cap allow_full_auto=false")
     if settings.risk.hard_stop_pct >= caps.max_loss_pct:
         violations.append(
             f"risk.hard_stop_pct={settings.risk.hard_stop_pct} must be below max_loss_pct cap {caps.max_loss_pct}"
@@ -206,6 +209,9 @@ def clamp_to_caps(settings: Settings, caps: HardCaps) -> tuple[Settings, list[st
         if clamped != value:
             set_path(data, rule.path, clamped)
             adjustments.append(f"{rule.path}: {value} -> {clamped} (hard cap {rule.cap_attr})")
+    if not caps.allow_full_auto and data["modes"].get("autonomy") in ("FULL_AUTO", "HYBRID"):
+        data["modes"]["autonomy"] = "HUMAN_IN_THE_LOOP"
+        adjustments.append("modes.autonomy -> HUMAN_IN_THE_LOOP (hard cap allow_full_auto=false)")
     risk = data["risk"]
     if risk["hard_stop_pct"] >= risk["max_loss_pct"]:
         new = max(risk["max_loss_pct"] - 1.0, risk["max_loss_pct"] * 0.9)

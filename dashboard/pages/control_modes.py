@@ -32,6 +32,11 @@ def render() -> None:
     version_id, settings = loaded
     st.caption(f"Settings version {version_id}. Changes apply to NEW trades; open positions keep their settings.")
 
+    with st.container(border=True):
+        st.markdown("#### Who decides - fully automatic or human in the loop")
+        st.caption("Overrides the per-mode execution policies below unless set to 'Per mode'.")
+        ui.autonomy_control(ctx, settings, key="modes_autonomy")
+
     # ---- allocations + selection policy (one form so the sum can be validated together)
     with st.form("modes_alloc_form"):
         st.markdown("#### Enable & allocate")

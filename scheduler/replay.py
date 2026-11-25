@@ -81,7 +81,7 @@ class ReplayReport:
 
 def replay_settings(base: Settings, cfg: ReplayConfig) -> Settings:
     """Settings for a replay: only the requested modes enabled, policy, backend, overrides."""
-    changes: dict[str, Any] = {"engine.llm_backend": cfg.llm_backend}
+    changes: dict[str, Any] = {"engine.llm_backend": cfg.llm_backend, "modes.autonomy": "PER_MODE"}
     for m in Mode:
         changes[f"modes.modes.{m.value}.enabled"] = m in cfg.modes
         changes[f"modes.modes.{m.value}.execution_policy"] = cfg.execution_policy.value

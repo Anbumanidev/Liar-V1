@@ -1,5 +1,8 @@
 """Route a vetted decision by the mode's execution policy (section 3).
 
+The policy is ``settings.modes.effective_policy`` - the global autonomy switch (FULL_AUTO /
+HYBRID / HUMAN_IN_THE_LOOP / SIGNALS_ONLY) overrides the per-mode policy unless PER_MODE.
+
 * risk veto            -> ``RISK_REJECTED`` + shadow(RISK)
 * ``SIGNALS_ONLY``     -> ``SIGNAL_ONLY`` (logged + emailed, never executed) + shadow
 * ``AUTO``             -> paper order submitted -> ``EXECUTED``
@@ -43,8 +46,7 @@ def route_decision(
     clock: Any | None = None,
 ) -> str:
     """Apply the execution policy; updates ``decision.final_action`` and returns it."""
-    mcfg = settings.mode(proposal.mode)
-    policy = ExecutionPolicy(mcfg.execution_policy)
+    policy = settings.modes.effective_policy(proposal.mode, grade=proposal.grade, confidence=proposal.confidence)
     final: str
     if not verdict.approved:
         final = FINAL_RISK_REJECTED
@@ -75,6 +77,10 @@ def route_decision(
         final = FINAL_QUEUED
         log_event("decisions", {"event": "queued", "decision_id": decision.id, "approval_id": item.id}, clock=clock)
     decision.final_action = final
+    ctx = dict(decision.context_json or {})
+    ctx["execution_policy"] = policy.value
+    ctx["autonomy"] = settings.modes.autonomy.value
+    decision.context_json = ctx
     session.flush()
     return final
 

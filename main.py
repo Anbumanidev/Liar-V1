@@ -1,6 +1,7 @@
 """Liar-V1 command line - PAPER TRADING ONLY.
 
     python main.py engine                      # run the trading engine (scheduler + control loop)
+    python main.py engine --autonomy FULL_AUTO # ... fully automatic (or HUMAN_IN_THE_LOOP / HYBRID / ...)
     python main.py init-db                     # create tables, seed settings + prompts, first batch
     python main.py analyze RELIANCE --mode INTRADAY [--route]
     python main.py replay --start 2026-10-01 --end 2026-10-31 --modes INTRADAY,SWING [--symbols A,B] [--llm rules]
@@ -32,8 +33,23 @@ def cmd_engine(args: argparse.Namespace) -> int:
     from control.engine import TradingEngine
 
     services = bootstrap(process="engine", llm_backend=args.llm)
+    if args.autonomy:
+        set_autonomy(services, args.autonomy)
     TradingEngine(services).run()
     return 0
+
+
+def set_autonomy(services: object, autonomy: str) -> None:
+    """Persist the autonomy switch as a new (audited) settings version and apply it."""
+    from config.store import apply_changes
+
+    svc = services  # control.bootstrap.Services
+    with svc.session() as s:  # type: ignore[attr-defined]
+        apply_changes(s, {"modes.autonomy": autonomy.upper()}, svc.caps, author="cli",  # type: ignore[attr-defined]
+                      note=f"autonomy set to {autonomy.upper()} from the command line", clock=svc.clock)  # type: ignore[attr-defined]
+        s.commit()
+    svc.reload_settings()  # type: ignore[attr-defined]
+    print(f"Autonomy: {autonomy.upper()} (PAPER trades only)")
 
 
 def cmd_init_db(args: argparse.Namespace) -> int:
@@ -91,6 +107,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     e = sub.add_parser("engine", help="run the trading engine")
     e.add_argument("--llm", choices=["ollama", "rules"], default=None, help="override the LLM backend")
+    e.add_argument("--autonomy", default=None,
+                   choices=["PER_MODE", "FULL_AUTO", "HYBRID", "HUMAN_IN_THE_LOOP", "SIGNALS_ONLY"],
+                   help="who decides: fully automatic or human in the loop (saved as a settings version)")
     e.set_defaults(func=cmd_engine)
 
     i = sub.add_parser("init-db", help="create tables, seed settings/prompts, create the first batch")
