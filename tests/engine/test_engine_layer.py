@@ -234,3 +234,53 @@ def test_replay_two_days(tmp_path: Path, monkeypatch) -> None:  # type: ignore[n
         assert s.scalar(select(func.count(Position.id)).where(Position.mode == "INTRADAY",
                                                               Position.status == "OPEN")) == 0
         assert s.scalar(select(func.count(Order.id)).where(Order.is_paper.is_(False))) == 0
+
+
+@pytest.mark.slow
+def test_replay_full_trade_lifecycle(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Force a setup + BUY decision; everything downstream is real: risk sizing, AUTO order,
+    fill, monitor exits / square-off, EOD capital processing, ledger."""
+    from core.enums import AgentStatus, TradeDecision, TrailingMethod
+    from core.types import ConfluenceResult, MetaDecision, StrategySignal
+    from core.enums import Grade
+
+    def fake_strategies(features, market, mode, settings, now, disabled=frozenset()):  # type: ignore[no-untyped-def]
+        if mode != Mode.INTRADAY:
+            return []
+        atr = features.atr or features.ltp * 0.004
+        e = round(features.ltp, 2)
+        return [StrategySignal(strategy="vwap_pullback", mode=mode, direction=Direction.LONG, entry_price=e,
+                               entry_type=EntryType.MARKET, stop_loss=round(e - atr, 2),
+                               target_1=round(e + 2 * atr, 2), target_2=round(e + 3 * atr, 2), strength=90,
+                               trailing_rule=TrailingMethod.ATR)]
+
+    def fake_meta(ctx, reports, vote, debate, settings, llm, prompts, *, enabled_modes):  # type: ignore[no-untyped-def]
+        sig = ctx.strategy_signals[0]
+        return MetaDecision(decision=TradeDecision.BUY, symbol=ctx.symbol, mode=ctx.mode, strategy=sig.strategy,
+                            entry_price=sig.entry_price, entry_type=EntryType.MARKET, stop_loss=sig.stop_loss,
+                            target_1=sig.target_1, target_2=sig.target_2, trailing_rule=sig.trailing_rule,
+                            confidence=85, status=AgentStatus.OK)
+
+    monkeypatch.setattr("strategies.registry.run_strategies", fake_strategies)
+    monkeypatch.setattr("strategies.confluence.compute_confluence",
+                        lambda *a, **k: ConfluenceResult(score=90.0, grade=Grade.A_PLUS))
+    monkeypatch.setattr("agents.meta.meta.run_meta", fake_meta)
+    frames = synthetic_frames(["INFY"])
+    db_url = f"sqlite:///{(tmp_path / 'life.db').as_posix()}"
+    cfg = ReplayConfig(start=REPLAY_DAYS[0], end=REPLAY_DAYS[0], modes=[Mode.INTRADAY], symbols=["INFY"],
+                       name="life", llm_backend="rules", db_url=db_url, step_minutes=5)
+    report = ReplayRunner(cfg, frames=frames).run()
+    assert report.ledger_ok
+    assert report.trades >= 1, report
+    from storage.db import create_all_for_url
+    from storage.models import Trade
+
+    sf = create_all_for_url(db_url)
+    with sf() as s:
+        assert s.scalar(select(func.count(Position.id)).where(Position.status == "OPEN")) == 0
+        reasons = {t.exit_reason for t in s.execute(select(Trade)).scalars()}
+        assert reasons <= {"SL", "TARGET", "TRAIL", "TIME", "SQUAREOFF"}
+        acct = s.execute(select(CapitalAccount)).scalar_one()
+        assert acct.last_eod_date == REPLAY_DAYS[0] and acct.blocked == pytest.approx(0.0, abs=1e-6)
+        # risk manager limits respected: at most max_trades_per_day INTRADAY entries
+        assert s.scalar(select(func.count(Position.id))) <= 3
