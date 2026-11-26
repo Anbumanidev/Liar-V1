@@ -144,11 +144,15 @@ def test_room_to_target(settings: Settings) -> None:
     cfg = settings.mode(Mode.INTRADAY)
     f = intraday_bull()
     sig = _signal("opening_range_breakout", settings, f)
-    blocked = f.model_copy(update={"timeframes": {**f.timeframes, "5m": f.timeframes["5m"].model_copy(
-        update={"levels": f.timeframes["5m"].levels.model_copy(update={"resistances": [100.35, 101.0]})})}})
+    def with_resistance(level: float):  # type: ignore[no-untyped-def]
+        return f.model_copy(update={"timeframes": {**f.timeframes, "5m": f.timeframes["5m"].model_copy(
+            update={"levels": f.timeframes["5m"].levels.model_copy(update={"resistances": [level, 101.0]})})}})
+
     a = compute_confluence(f, market(), sig, Mode.INTRADAY, cfg)
-    b = compute_confluence(blocked, market(), sig, Mode.INTRADAY, cfg)
-    assert b.components["room"] < a.components["room"]
+    blocked = compute_confluence(with_resistance(sig.entry_price + 0.5 * f.atr), market(), sig, Mode.INTRADAY, cfg)
+    assert blocked.components["room"] < a.components["room"]           # a real resistance just above cuts room
+    tested = compute_confluence(with_resistance(sig.entry_price + 0.1 * f.atr), market(), sig, Mode.INTRADAY, cfg)
+    assert tested.components["room"] == a.components["room"]           # a level the price is testing is ignored
 
 
 def test_empty_features_do_not_crash(settings: Settings) -> None:

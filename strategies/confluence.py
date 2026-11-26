@@ -121,7 +121,12 @@ def _trend_points(features: StockFeatures, timeframes: list[str], s: int, notes:
 
 
 def _volume_points(features: StockFeatures, mode: Mode, notes: list[str]) -> float:
-    rvol = features.rvol
+    # INTRADAY: today's volume so far vs normal by this time (a single 5m bar is too noisy).
+    rvol = features.extra.get("rvol_cum") if mode == Mode.INTRADAY else None
+    if rvol is None:
+        rvol = features.rvol
+    else:
+        notes.append(f"volume: {rvol:.2f}x the usual volume by this time of day")
     if rvol is None:
         tf = features.tf(features.primary_timeframe)
         rvol = tf.v("rvol") if tf is not None else None
@@ -193,7 +198,12 @@ def _room_points(
     risk = abs(signal.entry_price - signal.stop_loss) if signal is not None else (features.atr or 0.0)
     if risk <= 0:
         risk = entry * 0.01
-    lv = nearest_opposing_level(features, entry, direction, timeframes)
+    # Ignore noise: micro swing points of the fastest timeframe and levels right at the entry
+    # (within 0.25 ATR - the price is already testing them). 2026-11-26: five 5m swing highs within
+    # 0.2 of the price made room ~0R on every trend pullback, capping confluence below 60 all day.
+    atr = features.atr or 0.0
+    lv = nearest_opposing_level(features, entry, direction, timeframes, min_gap=0.25 * atr,
+                                skip_swings_of=features.primary_timeframe)
     if lv is None:
         has_any = bool(collect_levels(features, timeframes))
         notes.append("room: no opposing level" + (" (clear path)" if has_any else " (no level data)"))

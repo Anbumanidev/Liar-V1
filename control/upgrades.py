@@ -40,7 +40,7 @@ RECOMMENDED_2026_11_25: dict[str, Any] = {
     "risk.max_debate_deficit": 10,
     "risk.max_entry_drift_atr": 1.0,
     "risk.live_rr_tolerance": 0.8,
-    "risk.min_room_r": 1.0,
+    "risk.min_room_r": 0.5,     # 2026-11-26: 1.0 was calibrated on noise levels; real levels -> 0.5R
     "risk.fill_rr_min": 1.0,
     "modes.modes.INTRADAY.entry_windows": [{"start": "09:30", "end": "11:45"}, {"start": "13:15", "end": "14:45"}],
     "modes.modes.INTRADAY.reentry_cooldown_minutes": 60,
@@ -53,7 +53,7 @@ RECOMMENDED_2026_11_25: dict[str, Any] = {
 
 NOTE_2026_11_25 = ("2026-11-25 post-mortem fixes: one qwen3:4b model (6 GB GPU), 2 concurrent LLM calls, top-2 "
                    "setups per cycle, stale/chased/quorum/debate/room/re-entry gates, SL >= 0.8 ATR, "
-                   "INTRADAY skips 11:45-13:15")
+                   "INTRADAY skips 11:45-13:15; 26 Nov: NO_ROOM 0.5R after removing noise levels")
 
 
 def pending_changes(session: Session, caps: HardCaps, changes: dict[str, Any] | None = None, *,

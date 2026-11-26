@@ -78,23 +78,32 @@ def load_or_create_secret(path: Path) -> bytes:
 class SessionManager:
     """Sign / verify session cookies (stateless, plus an in-memory revocation list)."""
 
+    #: "Keep this screen live" sessions (a trading monitor): no 30-min idle logout, at most this long.
+    LIVE_IDLE = timedelta(hours=16)
+
     def __init__(self, secret: bytes, *, idle: timedelta, absolute: timedelta) -> None:
         self._serializer = URLSafeSerializer(secret, salt="liar-v1-webui-session")
         self.idle = idle
         self.absolute = absolute
+        self.live_idle = min(self.LIVE_IDLE, absolute)
         self._revoked: set[str] = set()
         self._lock = threading.Lock()
 
     def issue(self, username: str, now_ts: float, *, sid: str | None = None, csrf: str | None = None,
-              iat: float | None = None) -> tuple[str, dict[str, Any]]:
+              iat: float | None = None, keep_live: bool = False) -> tuple[str, dict[str, Any]]:
         payload = {"sid": sid or pysecrets.token_urlsafe(16), "u": username,
                    "csrf": csrf or pysecrets.token_urlsafe(32), "iat": iat if iat is not None else now_ts,
-                   "at": now_ts}
+                   "at": now_ts, "kl": bool(keep_live)}
         return self._serializer.dumps(payload), payload
+
+    def idle_limit(self, payload: dict[str, Any]) -> timedelta:
+        """30 min normally; up to 16 h for a session opened with 'Keep this screen live'."""
+        return self.live_idle if payload.get("kl") else self.idle
 
     def refresh(self, payload: dict[str, Any], now_ts: float) -> str:
         """Re-sign with ``at = now`` (sliding idle timeout)."""
-        return self.issue(payload["u"], now_ts, sid=payload["sid"], csrf=payload["csrf"], iat=payload["iat"])[0]
+        return self.issue(payload["u"], now_ts, sid=payload["sid"], csrf=payload["csrf"], iat=payload["iat"],
+                          keep_live=bool(payload.get("kl")))[0]
 
     def verify(self, token: str | None, now_ts: float) -> tuple[dict[str, Any] | None, str]:
         """Return ``(payload, "")`` or ``(None, reason)``."""
@@ -113,8 +122,10 @@ class SessionManager:
             at, iat = float(payload["at"]), float(payload["iat"])
         except (TypeError, ValueError):
             return None, "invalid session"
-        if now_ts - at >= self.idle.total_seconds():
-            return None, "Session expired after 30 minutes of inactivity. Please log in again."
+        if now_ts - at >= self.idle_limit(payload).total_seconds():
+            return None, ("Session expired after 30 minutes of inactivity. Please log in again (tick 'Keep this "
+                          "screen live' to keep a monitor screen signed in)." if not payload.get("kl")
+                          else "Live-screen session ended after 16 hours. Please log in again.")
         if now_ts - iat >= self.absolute.total_seconds():
             return None, "Session expired. Please log in again."
         return payload, ""
@@ -124,7 +135,7 @@ class SessionManager:
             self._revoked.add(sid)
 
     def idle_deadline(self, payload: dict[str, Any]) -> float:
-        return float(payload["at"]) + self.idle.total_seconds()
+        return float(payload["at"]) + self.idle_limit(payload).total_seconds()
 
 
 def cookie_header(value: str, *, secure: bool, max_age: int | None = None) -> bytes:

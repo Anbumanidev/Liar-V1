@@ -290,6 +290,19 @@ class TradingEngine:
             s.commit()
         svc.extras["engine_state"] = EngineState.RUNNING
         self._fail_orphaned_commands()
+        if svc.settings.engine.keep_awake and not svc.ctx.is_replay:
+            from core.power import keep_awake
+
+            self._awake = keep_awake(display=svc.settings.engine.keep_display_on)
+        if (svc.settings.engine.llm_backend == "ollama" and svc.settings.engine.auto_start_ollama
+                and not svc.ctx.is_replay):
+            from agents.ollama_service import ensure_running
+
+            ok = ensure_running(svc.llm, svc.settings.models.ollama_host, svc.ctx.runtime_dir)
+            self._health["llm"] = ok
+            if not ok:
+                activity("engine", "Ollama is not running and could not be started - AI analysis will fail until "
+                                   "it is up (start the Ollama app)", clock=svc.clock, level="error")
         if self.use_scheduler:
             self._schedule()
         logger.info("[engine] running (PAPER TRADING ONLY). Ctrl+C to stop.")
@@ -315,6 +328,10 @@ class TradingEngine:
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[engine] command worker shutdown: {exc}")
             activity("engine", "stopped", clock=svc.clock, state="STOPPED")
+            if getattr(self, "_awake", False):
+                from core.power import release
+
+                release()
             with svc.session() as s:
                 set_engine_state(s, EngineState.STOPPED, now=svc.clock.now(), activity="stopped")
                 s.commit()

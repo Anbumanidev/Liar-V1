@@ -190,30 +190,35 @@ def in_windows(now: datetime, windows: Iterable[tuple[str, str]]) -> bool:
     return False
 
 
-def collect_levels(features: StockFeatures, timeframes: Sequence[str] | None = None) -> list[float]:
-    """All known price levels (pivots, CPR, S/R, swing points, prev day H/L/C, 52w H/L)."""
+def collect_levels(features: StockFeatures, timeframes: Sequence[str] | None = None, *,
+                   skip_swings_of: str | None = None) -> list[float]:
+    """All known price levels (pivots, CPR, S/R, swing points, prev day H/L/C, 52w H/L).
+
+    ``skip_swings_of``: leave out the raw swing highs/lows of that timeframe (micro levels).
+    """
     out: list[float] = []
     tfs = timeframes if timeframes is not None else list(features.timeframes)
     for name in tfs:
         tf = features.tf(name)
         if tf is None or tf.levels is None:
             continue
-        out.extend(_levels_of(tf.levels))
+        out.extend(_levels_of(tf.levels, swings=str(name) != str(skip_swings_of)))
     for v in (features.week52_high, features.week52_low, features.prev_close):
         if v is not None:
             out.append(float(v))
     return [x for x in out if x is not None and math.isfinite(x) and x > 0]
 
 
-def _levels_of(lv: Levels) -> list[float]:
+def _levels_of(lv: Levels, *, swings: bool = True) -> list[float]:
     vals: list[float | None] = [
         lv.pivot, lv.r1, lv.r2, lv.r3, lv.s1, lv.s2, lv.s3, lv.cpr_bc, lv.cpr_tc,
         lv.prev_high, lv.prev_low, lv.prev_close,
     ]
     vals.extend(lv.supports)
     vals.extend(lv.resistances)
-    vals.extend(lv.swing_highs)
-    vals.extend(lv.swing_lows)
+    if swings:
+        vals.extend(lv.swing_highs)
+        vals.extend(lv.swing_lows)
     return [float(v) for v in vals if v is not None]
 
 
@@ -225,10 +230,17 @@ def levels_beyond(levels: Iterable[float], price: float, direction: Direction) -
 
 
 def nearest_opposing_level(
-    features: StockFeatures, price: float, direction: Direction, timeframes: Sequence[str] | None = None
+    features: StockFeatures, price: float, direction: Direction, timeframes: Sequence[str] | None = None,
+    *, min_gap: float = 0.0, skip_swings_of: str | None = None,
 ) -> float | None:
-    """Nearest level in the trade's path (resistance for LONG, support for SHORT)."""
-    lv = levels_beyond(collect_levels(features, timeframes), price, direction)
+    """Nearest level in the trade's path (resistance for LONG, support for SHORT).
+
+    ``min_gap``: ignore levels closer than this to ``price`` (already being tested);
+    ``skip_swings_of``: ignore that timeframe's raw swing points.
+    """
+    s = sign(direction)
+    lv = [x for x in levels_beyond(collect_levels(features, timeframes, skip_swings_of=skip_swings_of), price,
+                                   direction) if (x - price) * s > min_gap]
     return lv[0] if lv else None
 
 

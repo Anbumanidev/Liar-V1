@@ -39,14 +39,20 @@ function renderLogin({ notice = null, setup = false } = {}) {
   const user = h('input', { class: 'input', name: 'username', autocomplete: 'username', placeholder: 'admin', required: true });
   const pass = h('input', { class: 'input', name: 'password', type: 'password', autocomplete: 'current-password', required: true });
   const submit = h('button', { class: 'btn primary lg block', type: 'submit' }, 'Log in');
+  let liveSaved = false;
+  try { liveSaved = localStorage.getItem('liar.keepLive') === '1'; } catch { /* private mode */ }
+  const keepLive = h('input', { type: 'checkbox', name: 'keep_live', checked: liveSaved });
+  const liveRow = h('label', { class: 'check-row', title: 'For a screen that just watches the market: no sign-out after 30 minutes without clicks (max 16 hours). Use only on your own PC.' },
+    keepLive, h('span', null, 'Keep this screen live (monitor - stays signed in up to 16 h)'));
   const form = h('form', null,
     h('label', { class: 'field' }, h('span', null, 'Username'), user),
-    h('label', { class: 'field' }, h('span', null, 'Password'), pass), err, submit);
+    h('label', { class: 'field' }, h('span', null, 'Password'), pass), liveRow, err, submit);
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     err.classList.add('hidden');
     try {
-      const res = await ui.busy(submit, () => api.post('/api/login', { username: user.value, password: pass.value }));
+      const res = await ui.busy(submit, () => api.post('/api/login', { username: user.value, password: pass.value, keep_live: keepLive.checked }));
+      try { localStorage.setItem('liar.keepLive', keepLive.checked ? '1' : '0'); } catch { /* ignore */ }
       setCsrf(res.csrf);
       boot();
     } catch (ex) {

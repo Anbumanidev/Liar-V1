@@ -255,7 +255,7 @@ class RiskSettings(_Cfg):
     max_debate_deficit: int = Field(default=10, ge=0, le=100)           # DEBATE_AGAINST: bear - bull conviction
     max_entry_drift_atr: float = Field(default=1.0, ge=0)               # PRICE_MOVED: live price vs planned entry (0 = off)
     live_rr_tolerance: float = Field(default=0.8, gt=0, le=1)           # R:R at the live price >= min_rr x this
-    min_room_r: float = Field(default=1.0, ge=0)                        # NO_ROOM: nearest opposing level in R (0 = off)
+    min_room_r: float = Field(default=0.5, ge=0)                        # NO_ROOM: nearest opposing level in R (0 = off)
     fill_rr_min: float = Field(default=1.0, ge=0)                       # cancel an entry if R:R at the fill price < this
     # ---- price behaviour check (CHASING_HIGH / HISTORY_FADES; INTRADAY + BTST system trades)
     behaviour_check_enabled: bool = True
@@ -364,6 +364,9 @@ class EngineSettings(_Cfg):
     next_day_max_candidates: int = Field(default=10, ge=1, le=50)
     next_day_min_score: float = Field(default=55.0, ge=0, le=100)
     followup_priority: bool = True                 # INTRADAY cycles analyse the plan + "use for trading" lists first
+    keep_awake: bool = True                        # Windows: no sleep while the engine runs (core/power.py)
+    keep_display_on: bool = True                   # ... and keep the screen on so the dashboard stays visible
+    auto_start_ollama: bool = True                 # start the local `ollama serve` if it is not running
 
 
 class ModelProfile(_Cfg):

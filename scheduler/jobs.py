@@ -266,6 +266,26 @@ def _llm_limits(svc: Any, mode: Mode, check_timing: bool) -> dict[str, Any]:
     return {"top_k": eng.max_llm_candidates_evening, "budget_s": None}
 
 
+_WEAK_WORDS = {"trend": "weak trend", "volume": "low volume", "regime": "regime does not fit",
+               "market": "market not aligned", "candles": "no confirming candle", "room": "resistance close",
+               "sentiment": "news against", "fundamentals": "weak fundamentals"}
+
+
+def _near_miss(low: list[Any]) -> str:
+    """'ITC ema_9_21_pullback 57.6 (weak: low volume, resistance close)' for the best sub-threshold setup."""
+    from strategies.confluence import COMPONENT_MAX
+
+    best = max(low, key=lambda r: r.confluence.score if r.confluence is not None else 0.0)
+    conf = best.confluence
+    if conf is None:
+        return best.symbol
+    strat = next((n.split(" ", 2)[1] for n in conf.notes if n.startswith("strategy ")), "")
+    fracs = sorted(((v / COMPONENT_MAX[k], k) for k, v in conf.components.items()
+                    if k in COMPONENT_MAX and COMPONENT_MAX[k] > 0), key=lambda x: x[0])
+    weak = [_WEAK_WORDS.get(k, k) for f, k in fracs if f < 0.35][:3]
+    return f"{best.symbol} {strat} {conf.score:.1f}" + (f" (weak: {', '.join(weak)})" if weak else "")
+
+
 def _analyse_chunk(svc: Any, mode: Mode, chunk: list[str], *, batch_id: int, run_id: int,
                    check_timing: bool, top_k: int | None = None, budget_s: float | None = -1.0,
                    route: bool = True, use_llm: bool = True, results: list[Any] | None = None) -> dict[str, int]:
@@ -316,17 +336,27 @@ def _analyse_chunk(svc: Any, mode: Mode, chunk: list[str], *, batch_id: int, run
     window_ok, window_why = True, ""
     if check_timing and getattr(svc, "risk", None) is not None and hasattr(svc.risk, "in_entry_window"):
         window_ok, window_why = svc.risk.in_entry_window(mode, _now(svc))
-    no_setup = len(chunk) - len(pending)
     screen_s = _time.monotonic() - t_screen
+    screened = [r for r in done if r is not None]
+    no_setup = sum(1 for r in screened if r.filtered_reason == "no strategy setup")
+    low = [r for r in screened if r.filtered_reason and r.filtered_reason.startswith("confluence")]
+    other = len(screened) - no_setup - len(low)
+    parts = [f"{no_setup} without a setup"]
+    if low:
+        parts.append(f"{len(low)} setup(s) below the confluence bar {svc.settings.mode(mode).min_confluence:g} - "
+                     f"closest: {_near_miss(low)}")
+    if other:
+        parts.append(f"{other} skipped (no data / errors)")
+    tail = "; ".join(parts) + f" ({len(chunk)} screened in {screen_s:.0f}s)"
     if pending:
         cands = ", ".join(f"{h.symbol} ({h.confluence:.0f})" for h in pending)
         nxt = ("none - outside the entry window" if not window_ok else "none - screening only" if not use_llm
                else ", ".join(h.symbol for h in pending[:top_k]))
-        activity("cycle", f"{mode.value}: {len(pending)} setup(s) passed the filter: {cands}; to the AI: {nxt} "
-                          f"({no_setup} without a setup, {screen_s:.0f}s)", clock=svc.clock, mode=mode.value)
+        activity("cycle", f"{mode.value}: {len(pending)} setup(s) passed the filter: {cands}; to the AI: {nxt}; "
+                          + tail, clock=svc.clock, mode=mode.value)
     else:
-        activity("cycle", f"{mode.value}: no stock has a setup right now ({len(chunk)} screened in {screen_s:.0f}s)"
-                          " - nothing for the AI to analyse", clock=svc.clock, mode=mode.value)
+        activity("cycle", f"{mode.value}: no setup good enough for the AI this cycle - " + tail, clock=svc.clock,
+                 mode=mode.value)
     t0 = _time.monotonic()
     sent = 0
     for i, h in enumerate(pending):

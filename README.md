@@ -118,6 +118,17 @@ The engine and dashboard are **separate processes**. The dashboard only writes `
 and settings versions. The engine polls those every 2–5 s, executes them, and writes the results
 and its heartbeat back.
 
+**Keeping it running all day:**
+* While the engine runs, it tells Windows not to sleep and keeps the screen on
+  (`engine.keep_awake`, `engine.keep_display_on`); normal sleep returns when it stops. Closing a
+  laptop lid still follows Windows' lid setting: set "When I close the lid: Do nothing" if you
+  close it.
+* If Ollama isn't running when the engine starts, the engine starts `ollama serve` itself
+  (`engine.auto_start_ollama`, local only; log in `runtime/ollama.log`).
+* On the dashboard login, tick **Keep this screen live** for a monitoring screen. It then stays
+  signed in and refreshing for up to 16 hours instead of signing out after 30 minutes without
+  clicks. Use it only on your own PC.
+
 **What is the engine doing?** It says so, in the terminal and on the dashboard's **Live log**:
 * on start and whenever it changes (at least every 10 min), one status line, e.g.
   `idle - intraday scans run 09:30-14:45 (over for today); next: eod at 15:30; next scan:
@@ -312,7 +323,7 @@ Each is a deterministic rule with its own code, applies to system trades, and ca
 | `PRICE_MOVED` | at the **live** price: R:R < 0.8 × min R:R, stop < 0.8 ATR away, price moved > 1 ATR from the plan, or already through the stop | on |
 | `AGENT_QUORUM` | more than 34 % of the LLM agents failed | 34 % |
 | `DEBATE_AGAINST` | bear conviction − bull conviction ≥ 10 | on |
-| `NO_ROOM` | the nearest resistance/support is less than 1R from the entry | 1R |
+| `NO_ROOM` | the nearest real resistance/support (micro 5-minute swings and levels the price is already testing are ignored) is less than 0.5R from the entry | 0.5R |
 | `REENTRY_COOLDOWN` | the same symbol hit its stop recently | INTRADAY 60 min |
 | fill check | at the actual paper fill: R:R to T1 < 1.0, or the stop is < 0.8 ATR away → entry skipped | on |
 | `CHASING_HIGH` | buying in the top 20 % of the day's range when stretched (> 2.5 ATR above VWAP) or after the day already moved its normal daily range; on such an exhausted day, any long above 60 % of the range (shorts mirrored) | on |

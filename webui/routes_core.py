@@ -38,6 +38,7 @@ AUTO_LEVELS = ("FULL_AUTO", "HYBRID")
 class LoginBody(BaseModel):
     username: str = Field(default="", max_length=64)
     password: str = Field(default="", max_length=256)
+    keep_live: bool = False   # trading-monitor screen: no 30-minute idle logout (max 16 h)
 
 
 @router.post("/login")
@@ -62,9 +63,13 @@ def login(body: LoginBody, request: Request) -> JSONResponse:
         return JSONResponse(status_code=500, content={"detail": "Login failed because of a database error."})
     if result.ok:
         sm = request.app.state.sessions
-        token, payload = sm.issue(result.username, now.timestamp())
+        token, payload = sm.issue(result.username, now.timestamp(), keep_live=body.keep_live)
+        if body.keep_live:
+            logger.info(f"[webui] {result.username} signed in with 'Keep this screen live' "
+                        f"(idle limit {sm.idle_limit(payload)})")
         resp = JSONResponse(content={"username": result.username, "csrf": payload["csrf"],
-                                     "idle_timeout_s": int(sm.idle.total_seconds())})
+                                     "idle_timeout_s": int(sm.idle_limit(payload).total_seconds()),
+                                     "keep_live": bool(body.keep_live)})
         resp.headers.append("set-cookie", cookie_header(token, secure=ctx.secure_cookies).decode("latin-1"))
         return resp
     if result.reason == REASON_EMPTY:
@@ -102,7 +107,8 @@ def me(request: Request) -> dict[str, Any]:
     ctx = get_ctx(request)
     payload = request.state.session
     sm = request.app.state.sessions
-    return {"username": payload["u"], "csrf": payload["csrf"], "idle_timeout_s": int(sm.idle.total_seconds()),
+    return {"username": payload["u"], "csrf": payload["csrf"],
+            "idle_timeout_s": int(sm.idle_limit(payload).total_seconds()), "keep_live": bool(payload.get("kl")),
             "server_time": iso(ctx.clock.now()), "streamlit_url": ctx.streamlit_url, "paper_only": True,
             "allow_full_auto": bool(ctx.caps.allow_full_auto), "cookie": COOKIE_NAME}
 

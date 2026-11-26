@@ -218,6 +218,33 @@ def timeframe_features(
 # --------------------------------------------------------------------------- pure core
 
 
+def cumulative_rvol(intraday: pd.DataFrame, session_date: Any, sessions: int = 10, min_sessions: int = 3
+                    ) -> float | None:
+    """Today's volume so far / the average volume of the prior sessions up to the same time of day.
+
+    A single 5-minute bar's relative volume swings wildly (ONGC 0.24 -> 1.23 on consecutive bars on
+    2026-11-26) and made the confluence volume component ~0 all day; the cumulative ratio answers
+    the actual question - is this stock trading more than usual today?
+    """
+    try:
+        dates = np.array(intraday.index.date)
+        today = intraday[dates == session_date]
+        if today.empty:
+            return None
+        last = today.index[-1]
+        cut = last.hour * 60 + last.minute
+        tod = np.array(intraday.index.hour * 60 + intraday.index.minute)
+        prior_days = sorted({d for d in dates if d < session_date})[-sessions:]
+        totals = [float(intraday.loc[(dates == d) & (tod <= cut), "volume"].sum()) for d in prior_days]
+        totals = [x for x in totals if x > 0]
+        if len(totals) < min_sessions:
+            return None
+        avg = sum(totals) / len(totals)
+        return round(float(today["volume"].sum()) / avg, 4) if avg > 0 else None
+    except Exception:  # noqa: BLE001 - advisory feature
+        return None
+
+
 def build_from_frames(
     symbol: str,
     mode: Mode,
@@ -371,6 +398,8 @@ def build_from_frames(
     rs_n = rs_lookback or (RS_LOOKBACK_POSITIONAL if mode == Mode.POSITIONAL else RS_LOOKBACK_DEFAULT)
     rs = relative_strength(daily_c["close"], index_c["close"], rs_n) if has_daily and index_c is not None and len(index_c) else None
 
+    rvol_cum = cumulative_rvol(base, session_date) if base is not None and len(base) else None
+
     prim_inside_cpr = False
     if prim is not None:
         prim_inside_cpr = inside_cpr(prim.values.get("close"), prim.levels)
@@ -404,6 +433,7 @@ def build_from_frames(
             "missing_timeframes": sorted(set(missing)),
             "inside_cpr": prim_inside_cpr,
             "index_trend": (market.nifty_trend.value if market is not None else None),
+            "rvol_cum": rvol_cum,
         },
     )
 

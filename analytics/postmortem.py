@@ -54,7 +54,7 @@ CATALOG: dict[str, tuple[str, str, str, str | None]] = {
                     "risk rule DEBATE_AGAINST (bear - bull >= 10)"),
     "NO_ROOM": ("medium", "Resistance / support right in front of the entry",
                 "Require at least 1R of room to the nearest opposing level before entering.",
-                "risk rule NO_ROOM (min_room_r 1.0)"),
+                "risk rule NO_ROOM (min_room_r 0.5, noise levels ignored)"),
     "REVENGE_REENTRY": ("medium", "Re-entered a symbol right after being stopped out",
                         "Cool down after a stop-loss in the same symbol.",
                         "risk rule REENTRY_COOLDOWN (INTRADAY 60 min)"),
@@ -304,7 +304,7 @@ def analyze_position(session: Session, position_id: int, data: Any = None, *,
                              + (f" ({failed}/{voting}, mostly timeouts)" if failed else "")))
     if deb.get("bull") is not None and deb.get("bear") is not None and deb["bear"] - deb["bull"] >= 10:
         issues.append(_issue("DEBATE_LOST", f"bear conviction {deb['bear']} vs bull {deb['bull']}"))
-    if room_r is not None and room_r < 1.0:
+    if room_r is not None and room_r < 0.5:
         issues.append(_issue("NO_ROOM", f"nearest opposing level only {room_r:.2f}R from the planned entry"))
     if opened is not None:
         prev = session.execute(

@@ -155,7 +155,7 @@ def test_fresh_well_placed_setup_passes(rm: RiskManager, settings: Settings) -> 
 @pytest.mark.parametrize("update,rule", [
     ({"failed_agents_pct": 40.0}, RiskRule.AGENT_QUORUM),
     ({"debate_bull": 60, "debate_bear": 70}, RiskRule.DEBATE_AGAINST),
-    ({"room_r": 0.6}, RiskRule.NO_ROOM),
+    ({"room_r": 0.4}, RiskRule.NO_ROOM),
     ({"valid_until": datetime(2026, 11, 25, 10, 29, tzinfo=IST)}, RiskRule.SIGNAL_EXPIRED),
     ({"created_at": datetime(2026, 11, 25, 10, 23, tzinfo=IST)}, RiskRule.SIGNAL_EXPIRED),   # 7 min old
     ({"ltp": 98.9}, RiskRule.PRICE_MOVED),                                                      # through the stop

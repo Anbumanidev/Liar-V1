@@ -834,3 +834,7 @@ details.more[open] summary { margin-bottom: 6px; }
   .wl-add .input { flex: 1 1 140px; width: auto !important; }
   .brange { margin: 4px 6px 0; }
 }
+
+/* login: keep-live option */
+.check-row { display: flex; align-items: center; gap: 8px; margin: 4px 0 12px; font-size: 13px; color: var(--text-2); cursor: pointer; }
+.check-row input { width: 16px; height: 16px; accent-color: var(--accent, #3b82f6); }
